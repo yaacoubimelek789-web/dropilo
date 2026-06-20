@@ -1,10 +1,15 @@
 <?php
 declare(strict_types=1);
 
-error_reporting(E_ALL);
-ini_set('display_errors', '1');
-
 $base = __DIR__;
+require_once $base . '/config/env.php';
+loadEnvFile($base . '/.env');
+
+$debug = filter_var(getenv('APP_DEBUG') ?: '0', FILTER_VALIDATE_BOOLEAN);
+error_reporting(E_ALL);
+ini_set('display_errors', $debug ? '1' : '0');
+ini_set('log_errors', '1');
+
 if (file_exists($base . '/vendor/autoload.php')) {
     require_once $base . '/vendor/autoload.php';
 }

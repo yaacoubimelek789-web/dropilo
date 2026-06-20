@@ -9,6 +9,11 @@ Options -Indexes
   RewriteRule ^(config|sql|src|pages|layouts)/ - [F,L]
 
   # Deny private root files
-  RewriteRule ^(bootstrap\.php|composer\.json|composer\.lock|README\.md)$ - [F,L]
-</IfModule>
+  RewriteRule ^(bootstrap\.php|composer\.json|composer\.lock|README\.md|\.env|\.env\.example)$ - [F,L]
 
+  # Deny debug, migration, and maintenance scripts (use Docker/CLI locally)
+  RewriteRule ^(debug_|migrate|backfill_|check_|verify_|final_verify|composer-setup) - [F,L]
+
+  # Deny risky public endpoints on production hosting
+  RewriteRule ^public/(trigger_migrate|install|gemini-test)\.php$ - [F,L]
+</IfModule>

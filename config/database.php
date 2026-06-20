@@ -2,24 +2,21 @@
 /**
  * Database configuration with profile switching.
  *
- * Supported profiles:
- * - local  : WAMP localhost
+ * Set credentials in .env (never commit .env).
+ *
+ * Profiles:
+ * - local  : Docker / WAMP
  * - remote : Hostinger MySQL
  *
- * Switch profile by setting DB_PROFILE:
- * - DB_PROFILE=local
- * - DB_PROFILE=remote
- *
- * If DB_PROFILE is not set, localhost/127.0.0.1 will use "local",
- * all other hosts will use "remote".
+ * DB_PROFILE=local|remote (auto: localhost -> local, else remote)
  */
 $profiles = [
     'local' => [
         'host'     => 'localhost',
         'port'     => 3306,
-        'dbname'   => 'u755103422_gloras',
-        'username' => 'root',
-        'password' => '',
+        'dbname'   => 'dropilo_db',
+        'username' => 'dropilo_user',
+        'password' => 'dropilo_pass',
         'charset'  => 'utf8mb4',
     ],
     'remote' => [
@@ -27,7 +24,7 @@ $profiles = [
         'port'     => 3306,
         'dbname'   => 'u631627980_dropilo',
         'username' => 'u631627980_dropilo',
-        'password' => 'Morino1234@@',
+        'password' => '',
         'charset'  => 'utf8mb4',
     ],
 ];
@@ -46,12 +43,11 @@ if (!isset($profiles[$requestedProfile])) {
 
 $selected = $profiles[$requestedProfile];
 
-// Optional env overrides (useful for deployment without editing this file).
 $selected['host'] = getenv('DB_HOST') ?: $selected['host'];
 $selected['port'] = (int) (getenv('DB_PORT') ?: $selected['port']);
 $selected['dbname'] = getenv('DB_NAME') ?: $selected['dbname'];
 $selected['username'] = getenv('DB_USER') ?: $selected['username'];
-$selected['password'] = getenv('DB_PASS') ?: $selected['password'];
+$selected['password'] = getenv('DB_PASS') !== false ? (string) getenv('DB_PASS') : $selected['password'];
 $selected['charset'] = getenv('DB_CHARSET') ?: $selected['charset'];
 
 return $selected;
