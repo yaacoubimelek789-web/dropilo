@@ -1,4 +1,6 @@
 /vendor/
 /node_modules/
 .env
+php.ini
+start-php.ps1
 DO_NOT_UPLOAD_HERE

@@ -1,0 +1,42 @@
+# Production stack for Hostinger VPS / EasyPanel (optional — EasyPanel may deploy from Dockerfile directly).
+# Usage on VPS: docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dropilo-app:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    env_file:
+      - .env
+    environment:
+      - APP_DEBUG=0
+      - DB_PROFILE=remote
+      - DB_HOST=db
+      - DB_PORT=3306
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=dropilo_db
+      - MYSQL_USER=dropilo_user
+      - MYSQL_PASSWORD=${DB_PASS:-dropilo_pass}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-dropilo_root_pass}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-dropilo_root_pass}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  db_data:

@@ -24,6 +24,9 @@ WORKDIR /var/www/html
 # Copy application files
 COPY . /var/www/html/
 
+# Never use Windows-local php.ini in the Linux container (breaks pdo_mysql, etc.)
+RUN rm -f /var/www/html/php.ini /var/www/html/start-php.ps1
+
 # Set permissions
 RUN chown -R www-data:www-data /var/www/html \
     && chmod -R 755 /var/www/html
@@ -40,5 +43,11 @@ RUN echo '<Directory /var/www/html/>\n\
 </Directory>' > /etc/apache2/conf-available/allow-override.conf && \
     a2enconf allow-override
 
+RUN echo 'ServerName localhost' >> /etc/apache2/apache2.conf
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 80
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["apache2-foreground"]

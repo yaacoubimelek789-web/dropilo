@@ -6,3 +6,5 @@
 docker-compose.yml
 Dockerfile
 .dockerignore
+php.ini
+start-php.ps1
