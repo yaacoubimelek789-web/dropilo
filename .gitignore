@@ -1,0 +1,4 @@
+/vendor/
+/node_modules/
+.env
+DO_NOT_UPLOAD_HERE

@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dropilo-app:latest
+    container_name: dropilo_app
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      - DB_PROFILE=remote
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=dropilo_db
+      - DB_USER=dropilo_user
+      - DB_PASS=dropilo_pass
+    depends_on:
+      - db
+
+  db:
+    image: mysql:8.0
+    container_name: dropilo_db
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_DATABASE=dropilo_db
+      - MYSQL_USER=dropilo_user
+      - MYSQL_PASSWORD=dropilo_pass
+      - MYSQL_ROOT_PASSWORD=dropilo_root_pass
+    volumes:
+      - db_data:/var/lib/mysql
+      # Uncomment the next line and provide the path to your SQL file to auto-import it on first run
+      # - ./u631627980_dropilo.20260616183319.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  db_data:

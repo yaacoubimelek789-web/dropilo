@@ -1,0 +1,61 @@
+/* Sales Protection Banner - Dedicated Styles */
+.protection-banner {
+    background: #000000 !important;
+    border-radius: 12px !important;
+    padding: 1.5rem 2rem !important;
+    margin-bottom: 2.5rem !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 1.5rem !important;
+    color: #ffffff !important;
+    border-left: 5px solid #10b981 !important;
+    position: relative !important;
+    overflow: hidden !important;
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.3) !important;
+    width: 100% !important;
+}
+
+.banner-icon {
+    width: 48px !important;
+    height: 48px !important;
+    background: rgba(16, 185, 129, 0.1) !important;
+    border-radius: 10px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex-shrink: 0 !important;
+}
+
+.banner-icon svg {
+    color: #10b981 !important;
+}
+
+.banner-content {
+    flex: 1 !important;
+}
+
+.banner-title {
+    margin: 0 0 0.25rem 0 !important;
+    color: #10b981 !important;
+    font-size: 1.25rem !important;
+    font-weight: 800 !important;
+    letter-spacing: -0.01em !important;
+}
+
+.banner-message {
+    margin: 0 !important;
+    color: #ffffff !important;
+    font-size: 0.95rem !important;
+    line-height: 1.6 !important;
+    font-weight: 400 !important;
+    opacity: 0.9 !important;
+}
+
+@media (max-width: 768px) {
+    .protection-banner {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        padding: 1.25rem !important;
+        gap: 1rem !important;
+    }
+}

@@ -1,0 +1,11 @@
+{
+    "name": "shopify-made-easy/orders",
+    "require": {
+        "php": ">=7.4",
+        "league/csv": "^9.8",
+        "phpoffice/phpspreadsheet": "^5.5"
+    },
+    "autoload": {
+        "classmap": ["src/"]
+    }
+}

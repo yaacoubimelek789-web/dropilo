@@ -1,0 +1,14 @@
+Options -Indexes
+
+# Block direct access to private application folders/files when the project
+# is uploaded to a web root (e.g. public_html).
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # Deny private directories
+  RewriteRule ^(config|sql|src|pages|layouts)/ - [F,L]
+
+  # Deny private root files
+  RewriteRule ^(bootstrap\.php|composer\.json|composer\.lock|README\.md)$ - [F,L]
+</IfModule>
+
