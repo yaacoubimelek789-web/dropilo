@@ -45,26 +45,144 @@ class FiabiloHelper
         return hash('sha256', $key, true);
     }
 
+    public static function governorates(): array
+    {
+        return [
+            'Ariana', 'Béja', 'Ben Arous', 'Bizerte', 'Gabès', 'Gafsa', 'Jendouba',
+            'Kairouan', 'Kasserine', 'Kébili', 'La Manouba', 'Le Kef', 'Mahdia',
+            'Médenine', 'Monastir', 'Nabeul', 'Sfax', 'Sidi Bouzid', 'Siliana',
+            'Sousse', 'Tataouine', 'Tozeur', 'Tunis', 'Zaghouan',
+        ];
+    }
+
+    public static function guessGovernorate(?string ...$parts): string
+    {
+        $hay = mb_strtolower(trim(implode(' ', array_filter($parts))), 'UTF-8');
+        if ($hay === '') {
+            return '';
+        }
+        $aliases = [
+            'manouba' => 'La Manouba', 'la manouba' => 'La Manouba',
+            'kef' => 'Le Kef', 'le kef' => 'Le Kef',
+            'kebili' => 'Kébili', 'kébili' => 'Kébili',
+            'medenine' => 'Médenine', 'médenine' => 'Médenine', 'mednine' => 'Médenine',
+            'beja' => 'Béja', 'béja' => 'Béja',
+            'gabes' => 'Gabès', 'gabès' => 'Gabès',
+            'tataouine' => 'Tataouine', 'tatawin' => 'Tataouine',
+            'nabeul' => 'Nabeul', 'hammamet' => 'Nabeul',
+            'ben arous' => 'Ben Arous', 'benarous' => 'Ben Arous', 'ezzahra' => 'Ben Arous', 'rades' => 'Ben Arous',
+            'ariana' => 'Ariana', 'la soukra' => 'Ariana',
+            'tunis' => 'Tunis', 'lac' => 'Tunis',
+            'sousse' => 'Sousse', 'msaken' => 'Sousse',
+            'sfax' => 'Sfax', 'monastir' => 'Monastir', 'mahdia' => 'Mahdia',
+            'bizerte' => 'Bizerte', 'kairouan' => 'Kairouan', 'gafsa' => 'Gafsa',
+            'jendouba' => 'Jendouba', 'kasserine' => 'Kasserine', 'siliana' => 'Siliana',
+            'zaghouan' => 'Zaghouan', 'tozeur' => 'Tozeur', 'sidi bouzid' => 'Sidi Bouzid',
+        ];
+        foreach ($aliases as $needle => $gov) {
+            if (str_contains($hay, $needle)) {
+                return $gov;
+            }
+        }
+        foreach (self::governorates() as $gov) {
+            if (str_contains($hay, mb_strtolower($gov, 'UTF-8'))) {
+                return $gov;
+            }
+        }
+        return '';
+    }
+
+    public static function resolveAddToken(PDO $pdo, int $userId, string $encryptionKey): string
+    {
+        $st = $pdo->prepare('SELECT add_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+        $st->execute([$userId, 'fiabilo']);
+        $row = $st->fetch();
+        if ($row && !empty($row['add_token_encrypted'])) {
+            $token = self::decrypt($row['add_token_encrypted'], $encryptionKey);
+            if ($token !== '') {
+                return $token;
+            }
+        }
+        return trim((string) (getenv('FIABILO_ADD_TOKEN') ?: ''));
+    }
+
+    public static function saveAddToken(PDO $pdo, int $userId, string $token, string $encryptionKey): void
+    {
+        $token = trim($token);
+        if ($token === '') {
+            return;
+        }
+        $addEnc = self::encrypt($token, $encryptionKey);
+        $st = $pdo->prepare('SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+        $st->execute([$userId, 'fiabilo']);
+        $existing = $st->fetch();
+        $trackEnc = $existing['tracking_token_encrypted'] ?? '';
+        $pdo->prepare('INSERT INTO user_integrations (user_id, provider, add_token_encrypted, tracking_token_encrypted) VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE add_token_encrypted = VALUES(add_token_encrypted)')
+            ->execute([$userId, 'fiabilo', $addEnc, $trackEnc]);
+    }
+
     /**
      * Send order to Fiabilo (Add API).
      * Returns ['tracking_code' => '...'] on success or ['error' => '...'].
      */
     public static function sendOrder(string $addToken, array $order): array
     {
+        $ouvrirRaw = $order['ouvrir'] ?? 0;
+        if ($ouvrirRaw === 'Oui' || $ouvrirRaw === 'Non') {
+            $ouvrir = $ouvrirRaw;
+        } else {
+            $ouvrir = ((int) $ouvrirRaw === 1) ? 'Oui' : 'Non';
+        }
+
+        $gouvernorat = trim((string) ($order['gouvernerat'] ?? $order['gouvernorat'] ?? ''));
+        if ($gouvernorat === '' || !in_array($gouvernorat, self::governorates(), true)) {
+            $gouvernorat = self::guessGovernorate(
+                $order['billing_city'] ?? '',
+                $order['shipping_city'] ?? '',
+                $order['billing_address'] ?? '',
+                $order['shipping_address'] ?? '',
+                $order['billing_country'] ?? '',
+                $order['ville'] ?? ''
+            );
+        }
+
+        $ville = trim((string) ($order['ville'] ?? $order['billing_city'] ?? $order['shipping_city'] ?? ''));
+        $adresse = trim((string) ($order['adresse'] ?? $order['billing_address'] ?? $order['shipping_address'] ?? ''));
+        $localite = trim((string) ($order['localite'] ?? $order['billing_zip'] ?? $order['shipping_zip'] ?? ''));
+        if ($localite !== '' && $adresse !== '' && !str_contains(mb_strtolower($adresse, 'UTF-8'), mb_strtolower($localite, 'UTF-8'))) {
+            $adresse = trim($adresse . ', ' . $localite);
+        }
+
+        $prix = $order['prix'] ?? $order['total'] ?? 0;
+        if (!is_numeric($prix)) {
+            $prix = 0;
+        }
+
         $body = [
             'token' => $addToken,
-            'prix' => $order['total'] ?? 0,
-            'nom' => $order['billing_name'] ?? $order['shipping_name'] ?? '',
-            'tel' => $order['billing_phone'] ?? $order['phone'] ?? '',
-            'adresse' => $order['billing_address'] ?? $order['shipping_address'] ?? '',
-            'gouvernerat' => $order['billing_country'] ?? '',
-            'ville' => $order['billing_city'] ?? $order['shipping_city'] ?? '',
-            'cp' => $order['billing_zip'] ?? $order['shipping_zip'] ?? '',
-            'designation' => $order['designation'] ?? '',
-            'nb_article' => (int) ($order['nb_article'] ?? 1),
-            'msg' => $order['notes'] ?? '',
-            'ouvrir' => isset($order['ouvrir']) ? (int)$order['ouvrir'] : 0,
+            'prix' => (string) $prix,
+            'nom' => trim((string) ($order['nom'] ?? $order['billing_name'] ?? $order['shipping_name'] ?? '')),
+            'tel' => trim((string) ($order['tel'] ?? $order['billing_phone'] ?? $order['phone'] ?? '')),
+            'tel2' => trim((string) ($order['tel2'] ?? '')),
+            'adresse' => $adresse,
+            'gouvernerat' => $gouvernorat,
+            'ville' => $ville,
+            'cp' => trim((string) ($order['cp'] ?? $order['billing_zip'] ?? $order['shipping_zip'] ?? '')),
+            'designation' => trim((string) ($order['designation'] ?? '')),
+            'nb_article' => max(1, (int) ($order['nb_article'] ?? 1)),
+            'nb_colis' => max(1, (int) ($order['nb_colis'] ?? 1)),
+            'msg' => trim((string) ($order['msg'] ?? $order['notes'] ?? '')),
+            'echange' => trim((string) ($order['echange'] ?? '')),
+            'article' => trim((string) ($order['article'] ?? '')),
+            'nb_echange' => trim((string) ($order['nb_echange'] ?? '')),
+            'ouvrir' => $ouvrir,
         ];
+
+        if ($body['nom'] === '' || $body['tel'] === '' || $body['adresse'] === '' || $body['gouvernerat'] === '') {
+            return ['error' => 'Missing customer name, phone, address, or governorate'];
+        }
+
         $resp = self::post(self::API_URL, $body);
         if (isset($resp['error'])) {
             return $resp;

@@ -12,7 +12,7 @@ $allShops = $stShops->fetchAll();
 $stFiabilo = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
 $stFiabilo->execute([$uid, 'fiabilo']);
 $fiabiloRow = $stFiabilo->fetch();
-$hasFiabilo = $fiabiloRow && !empty($fiabiloRow['add_token_encrypted']) && !empty($fiabiloRow['tracking_token_encrypted']);
+$hasFiabilo = $fiabiloRow && !empty($fiabiloRow['add_token_encrypted']);
 
 // Check Intigo integration status
 $stIntigo = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
@@ -38,12 +38,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['save_fiabilo'])) {
         $addToken = trim($_POST['add_token'] ?? '');
         $trackingToken = trim($_POST['tracking_token'] ?? '');
-        if ($addToken !== '' && $trackingToken !== '') {
+        if ($addToken !== '') {
             try {
                 $addEnc = FiabiloHelper::encrypt($addToken, $encryptionKey);
-                $trackEnc = FiabiloHelper::encrypt($trackingToken, $encryptionKey);
+                $trackEnc = $trackingToken !== ''
+                    ? FiabiloHelper::encrypt($trackingToken, $encryptionKey)
+                    : ($fiabiloRow['tracking_token_encrypted'] ?? '');
                 $app->pdo->prepare('INSERT INTO user_integrations (user_id, provider, add_token_encrypted, tracking_token_encrypted) VALUES (?, ?, ?, ?) 
-                    ON DUPLICATE KEY UPDATE add_token_encrypted = VALUES(add_token_encrypted), tracking_token_encrypted = VALUES(tracking_token_encrypted)')
+                    ON DUPLICATE KEY UPDATE add_token_encrypted = VALUES(add_token_encrypted), tracking_token_encrypted = IF(VALUES(tracking_token_encrypted) = "", tracking_token_encrypted, VALUES(tracking_token_encrypted))')
                     ->execute([$uid, 'fiabilo', $addEnc, $trackEnc]);
                 $hasFiabilo = true;
             } catch (Throwable $e) {}

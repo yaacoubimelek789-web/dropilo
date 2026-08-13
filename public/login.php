@@ -6,13 +6,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($email === '' || $pass === '') {
         $error = 'Email and password are required.';
     } else {
-        $app = require dirname(__DIR__) . '/bootstrap.php';
-        $st = $app->pdo->prepare('SELECT id, password_hash, name FROM users WHERE email = ?');
+        if (!isset($app) || !is_object($app)) {
+            $app = require dirname(__DIR__) . '/bootstrap.php';
+        }
+        $st = $app->pdo->prepare('SELECT id, email, password_hash, name FROM users WHERE LOWER(email) = LOWER(?)');
         $st->execute([$email]);
         $user = $st->fetch();
         if ($user && password_verify($pass, $user['password_hash'])) {
             $_SESSION['user_id'] = (int) $user['id'];
-            $_SESSION['user_name'] = $user['name'] ?: $email;
+            $_SESSION['user_name'] = $user['name'] ?: $user['email'];
             header('Location: index.php');
             exit;
         }

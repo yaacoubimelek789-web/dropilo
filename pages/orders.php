@@ -413,11 +413,91 @@ if (($page ?? '') === 'order-view') {
         exit;
     }
 
+    // Send to Fiabilo from the Ajouter colis form
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_fiabilo_colis'])) {
+        $encKey = $app->app['encryption_key'] ?? '';
+        $postedToken = trim($_POST['fiabilo_add_token'] ?? '');
+        if ($postedToken !== '') {
+            FiabiloHelper::saveAddToken($app->pdo, $uid, $postedToken, $encKey);
+        }
+        $addToken = FiabiloHelper::resolveAddToken($app->pdo, $uid, $encKey);
+        if ($addToken === '') {
+            $message = '<div class="alert alert-error">FIABILO add token missing. Paste the API d\'ajout in the form and try again.</div>';
+        } elseif (!empty($order['fiabilo_tracking_code'])) {
+            $message = '<div class="alert alert-error">This order is already sent to FIABILO.</div>';
+        } else {
+            $nom = trim($_POST['colis_nom'] ?? '');
+            $tel = trim($_POST['colis_tel'] ?? '');
+            $tel2 = trim($_POST['colis_tel2'] ?? '');
+            $gouvernorat = trim($_POST['colis_gouvernorat'] ?? '');
+            $ville = trim($_POST['colis_ville'] ?? '');
+            $localite = trim($_POST['colis_localite'] ?? '');
+            $adresse = trim($_POST['colis_adresse'] ?? '');
+            $designation = trim($_POST['colis_designation'] ?? '');
+            $prix = OrderPricing::parseMoney($_POST['colis_prix'] ?? null);
+            $nbArticle = max(1, (int) ($_POST['colis_nb_article'] ?? 1));
+            $nbColis = max(1, (int) ($_POST['colis_nb_colis'] ?? 1));
+            $ouvrir = (($_POST['colis_ouvrir'] ?? 'Non') === 'Oui') ? 'Oui' : 'Non';
+
+            $app->pdo->prepare('UPDATE orders SET billing_name = ?, billing_phone = ?, phone = ?, billing_address = ?, shipping_address = ?, billing_city = ?, shipping_city = ?, billing_country = ?, billing_zip = ?, total = COALESCE(?, total), confirmed = 1, follow_up = 0, status = ? WHERE id = ?')
+                ->execute([
+                    $nom, $tel, $tel2 !== '' ? $tel2 : $tel, $adresse, $adresse, $ville, $ville,
+                    $gouvernorat, $localite, $prix, 'confirmed', $id,
+                ]);
+
+            $payload = [
+                'nom' => $nom,
+                'tel' => $tel,
+                'tel2' => $tel2,
+                'gouvernerat' => $gouvernorat,
+                'ville' => $ville,
+                'localite' => $localite,
+                'adresse' => $adresse,
+                'designation' => $designation,
+                'prix' => $prix ?? $order['total'] ?? 0,
+                'nb_article' => $nbArticle,
+                'nb_colis' => $nbColis,
+                'ouvrir' => $ouvrir,
+                'msg' => $order['notes'] ?? '',
+            ];
+            $result = FiabiloHelper::sendOrder($addToken, $payload);
+            if (isset($result['tracking_code'])) {
+                $app->pdo->prepare('UPDATE orders SET fiabilo_tracking_code = ?, fiabilo_status = ?, status = ?, fiabilo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                    ->execute([$result['tracking_code'], 'En attente', 'shipping', $id]);
+                header('Location: index.php?page=order-view&id=' . $id . '&shipped=1');
+                exit;
+            }
+            $message = '<div class="alert alert-error">FIABILO: ' . htmlspecialchars($result['error'] ?? 'Dispatch failed') . '</div>';
+            $st->execute([$id, $uid]);
+            $order = $st->fetch() ?: $order;
+        }
+    }
+
     $lines = $app->pdo->prepare('SELECT li.*, p.image_src, p.title AS product_title, p.variant_price,
             COALESCE(NULLIF(li.lineitem_price, 0), p.variant_price, 0) AS display_price
             FROM order_line_items li LEFT JOIN products p ON li.product_id = p.id WHERE li.order_id = ?');
     $lines->execute([$id]);
     $lines = $lines->fetchAll();
+
+    $colisDesignationParts = [];
+    $colisNbArticle = 0;
+    foreach ($lines as $li) {
+        $q = (int) $li['lineitem_quantity'];
+        $colisNbArticle += $q;
+        $colisDesignationParts[] = trim((string) ($li['product_title'] ?? $li['lineitem_name'])) . ' (x' . $q . ')';
+    }
+    $colisDesignation = implode(', ', $colisDesignationParts) ?: ('Order ' . ($order['name'] ?? ''));
+    $colisNbArticle = $colisNbArticle ?: 1;
+    $colisGov = FiabiloHelper::guessGovernorate(
+        $order['billing_country'] ?? '',
+        $order['billing_city'] ?? '',
+        $order['shipping_city'] ?? '',
+        $order['billing_address'] ?? '',
+        $order['shipping_address'] ?? ''
+    );
+    $fiabiloAddTokenReady = FiabiloHelper::resolveAddToken($app->pdo, $uid, $app->app['encryption_key'] ?? '') !== '';
+    $openFiabiloModal = (isset($_GET['ship']) && $_GET['ship'] === '1' && empty($order['fiabilo_tracking_code']))
+        || (isset($_POST['send_fiabilo_colis']) && $message !== '');
 
     // Get all products from shop for modal
     $allProducts = $app->pdo->prepare('SELECT id, title, variant_price, image_src FROM products WHERE shop_id = ? ORDER BY title');
@@ -629,10 +709,11 @@ if (($page ?? '') === 'order-view') {
                             ' . (($order['status'] === 'confirmed' || $order['confirmed'] == 1) ? '
                             <div class="shipping-quick-actions" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.2);">
                                 <div style="font-size: 0.7rem; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 0.75rem;">Send to Shipping</div>
-                                <form method="post" style="display: flex; gap: 0.5rem; flex-direction: column;">
+                                <button type="button" class="btn-react-full" style="background: #1e293b; color: white; border: none;" onclick="openFiabiloColisModal()">FIABILO Shipment</button>
+                                <form method="post" style="margin-top: 0.5rem;">
                                     <input type="hidden" name="order_ids[]" value="' . $id . '">
-                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #1e293b; color: white; border: none;"><input type="hidden" name="shipping" value="fiabilo">FIABILO Shipment</button>
-                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #0ea5e9; color: white; border: none;"><input type="hidden" name="shipping" value="intigo">INTIGO Shipment</button>
+                                    <input type="hidden" name="shipping" value="intigo">
+                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #0ea5e9; color: white; border: none;">INTIGO Shipment</button>
                                 </form>
                             </div>' : '') . '
                             ' : '<div class="read-only-notice"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg> Order is being shipped. Interaction disabled.</div>') . '
@@ -870,6 +951,10 @@ if (($page ?? '') === 'order-view') {
         $content .= '<div id="success-toast" class="toast-success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Order saved successfully!</div>
         <script>setTimeout(function() { document.getElementById("success-toast").classList.add("active"); }, 100); setTimeout(function() { document.getElementById("success-toast").classList.remove("active"); }, 4000);</script>';
     }
+    if (isset($_GET['shipped'])) {
+        $content .= '<div id="success-toast" class="toast-success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Colis sent to FIABILO</div>
+        <script>setTimeout(function() { document.getElementById("success-toast").classList.add("active"); }, 100); setTimeout(function() { document.getElementById("success-toast").classList.remove("active"); }, 4000);</script>';
+    }
 
     $currentProductIds = array_filter(array_column($lines, 'product_id'));
     $content .= '
@@ -993,6 +1078,66 @@ if (($page ?? '') === 'order-view') {
     </style>
     ';
 
+    $govOptionsHtml = '<option value="">Select gouvernorat</option>';
+    foreach (FiabiloHelper::governorates() as $g) {
+        $sel = ($colisGov === $g) ? ' selected' : '';
+        $govOptionsHtml .= '<option value="' . htmlspecialchars($g) . '"' . $sel . '>' . htmlspecialchars($g) . '</option>';
+    }
+    $tokenField = $fiabiloAddTokenReady
+        ? '<p class="colis-hint">FIABILO add token is saved. Dispatch will use it.</p>'
+        : '<div class="form-group"><label>API d\'ajout FIABILO</label><input type="password" name="fiabilo_add_token" placeholder="souqvibes-..." required></div>';
+
+    $content .= '
+    <div id="fiabilo-colis-modal" class="modal-modern" style="display:none;">
+        <div class="modal-content-modern glass" style="max-width:720px; max-height:92vh;">
+            <div class="modal-header-modern">
+                <h3>Ajouter colis — FIABILO</h3>
+                <button type="button" class="close-modal-btn" onclick="closeFiabiloColisModal()">&times;</button>
+            </div>
+            <form method="post" class="modal-form-modern" id="fiabilo-colis-form">
+                <input type="hidden" name="send_fiabilo_colis" value="1">
+                <div class="modal-body-grid" style="grid-template-columns:1fr; overflow-y:auto;">
+                    <h4>Informations client</h4>
+                    <div class="form-group"><label>Nom complet</label><input type="text" name="colis_nom" required value="' . htmlspecialchars($order['billing_name'] ?? '') . '"></div>
+                    <div class="form-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                        <div class="form-group"><label>Téléphone</label><input type="text" name="colis_tel" required value="' . htmlspecialchars($order['billing_phone'] ?? $order['phone'] ?? '') . '"></div>
+                        <div class="form-group"><label>Téléphone 2</label><input type="text" name="colis_tel2" value=""></div>
+                    </div>
+                    <h4>Adresse de livraison</h4>
+                    <div class="form-group"><label>Gouvernorat</label><select name="colis_gouvernorat" required>' . $govOptionsHtml . '</select></div>
+                    <div class="form-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                        <div class="form-group"><label>Ville</label><input type="text" name="colis_ville" required value="' . htmlspecialchars($order['billing_city'] ?? $order['shipping_city'] ?? '') . '"></div>
+                        <div class="form-group"><label>Localité</label><input type="text" name="colis_localite" value="' . htmlspecialchars($order['billing_zip'] ?? $order['shipping_zip'] ?? '') . '"></div>
+                    </div>
+                    <div class="form-group"><label>Adresse complète</label><input type="text" name="colis_adresse" required value="' . htmlspecialchars($order['billing_address'] ?? $order['shipping_address'] ?? '') . '"></div>
+                    <h4>Informations colis</h4>
+                    <div class="form-group"><label>Désignation</label><input type="text" name="colis_designation" required value="' . htmlspecialchars($colisDesignation) . '"></div>
+                    <div class="form-grid" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem;">
+                        <div class="form-group"><label>Prix en DT</label><input type="number" step="0.01" min="0" name="colis_prix" required value="' . htmlspecialchars((string) ($order['total'] !== null ? $order['total'] : '0')) . '"></div>
+                        <div class="form-group"><label>Nombre d\'articles</label><input type="number" min="1" name="colis_nb_article" value="' . (int) $colisNbArticle . '"></div>
+                        <div class="form-group"><label>Nombre de colis</label><input type="number" min="1" name="colis_nb_colis" value="1"></div>
+                    </div>
+                    <div class="form-group"><label>Le client peut ouvrir le colis ?</label>
+                        <select name="colis_ouvrir"><option value="Non">Non</option><option value="Oui">Oui</option></select>
+                    </div>
+                    ' . $tokenField . '
+                </div>
+                <div class="modal-footer-modern">
+                    <button type="button" onclick="closeFiabiloColisModal()" class="btn-react btn-secondary">Annuler</button>
+                    <button type="submit" class="btn-react btn-primary">Envoyer à FIABILO</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <style>
+    #fiabilo-colis-modal .form-group { margin-bottom: 0.75rem; }
+    #fiabilo-colis-modal .form-group label { display:block; font-size:0.75rem; font-weight:800; color:#64748b; text-transform:uppercase; margin-bottom:0.35rem; }
+    #fiabilo-colis-modal .form-group input, #fiabilo-colis-modal .form-group select { width:100%; padding:0.7rem 0.85rem; border:1px solid #e2e8f0; border-radius:0.7rem; font-weight:600; }
+    #fiabilo-colis-modal h4 { margin: 0.25rem 0 0.75rem; font-size:0.8rem; letter-spacing:0.04em; text-transform:uppercase; color:#0f172a; }
+    .colis-hint { font-size:0.8rem; color:#16a34a; font-weight:600; margin:0.5rem 0 0; }
+    </style>
+    ';
+
     // Total update form
     $content .= '<form id="total-form" method="post" style="display:none;"><input type="hidden" name="save_customer" value="1">';
     $content .= '<input type="hidden" name="billing_name" id="hf_billing_name" value="' . htmlspecialchars($order['billing_name'] ?? '') . '">';
@@ -1096,6 +1241,16 @@ function closeProductModal() {
     document.getElementById("product-modal").style.display = "none";
 }
 
+function openFiabiloColisModal() {
+    var m = document.getElementById("fiabilo-colis-modal");
+    if (m) m.style.display = "flex";
+}
+
+function closeFiabiloColisModal() {
+    var m = document.getElementById("fiabilo-colis-modal");
+    if (m) m.style.display = "none";
+}
+
 function filterProducts() {
     var s = document.getElementById("product-search").value.toLowerCase();
     document.querySelectorAll(".selection-item").forEach(function(e) {
@@ -1157,7 +1312,9 @@ document.addEventListener("DOMContentLoaded", function() {
 
 window.onclick = function(e) {
     if (e.target.id === "product-modal") closeProductModal();
+    if (e.target.id === "fiabilo-colis-modal") closeFiabiloColisModal();
 };
+' . ($openFiabiloModal ? 'document.addEventListener("DOMContentLoaded", function(){ openFiabiloColisModal(); });' : '') . '
 </script>';
     require $base . '/layouts/layout.php';
     return;
@@ -1175,6 +1332,8 @@ if ($mark > 0 && (($page ?? '') === 'orders-confirmed' || ($page ?? '') === 'ord
         if (($page ?? '') === 'orders-confirmed') {
             $app->pdo->prepare("UPDATE orders SET confirmed = 1, follow_up = 0, status = ?, confirmed_at = NOW() WHERE id = ?")->execute([$newStatus, $mark]);
             OrderPricing::syncOrderTotal($app->pdo, $mark, true);
+            header('Location: index.php?page=order-view&id=' . $mark . '&ship=1');
+            exit;
         } else {
             $app->pdo->prepare("UPDATE orders SET follow_up = 1, confirmed = 0, status = ?, confirmed_at = NULL, followup_at = NOW() WHERE id = ?")->execute([$newStatus, $mark]);
         }
