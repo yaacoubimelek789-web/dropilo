@@ -30,6 +30,9 @@ if ($now >= $today7am) {
     }
 }
 
+// Keep Fiabilo statuses exact (fixes stuck En attente / Enlever while already Livrer/Retour)
+FiabiloHelper::syncUserShipments($app->pdo, $uid, $app->app['encryption_key'] ?? '', 60);
+
 // Analytics Filter Handling
 $dateRange = $_GET['range'] ?? 'today';
 $customFrom = $_GET['from'] ?? '';
@@ -80,50 +83,6 @@ $refCol = $refColMap[$selectedStatus] ?? 'o.created_at';
 // Base query for user's data
 $userOrdersQuery = "FROM orders o INNER JOIN shops s ON o.shop_id = s.id WHERE s.user_id = $uid";
 
-// REAL-TIME SYNC: Check statuses from Fiabilo for active shipments
-if ($integration && !empty($integration['tracking_token_encrypted'])) {
-    $trackingToken = FiabiloHelper::decrypt($integration['tracking_token_encrypted'], $app->app['encryption_key'] ?? '');
-    if ($trackingToken) {
-        $syncCount = 0;
-        $syncErrors = [];
-        // Sync last 100 orders that are shipping but not final.
-        $syncSt = $app->pdo->prepare("SELECT o.id, o.fiabilo_tracking_code, o.fiabilo_status FROM orders o JOIN shops s ON o.shop_id = s.id WHERE s.user_id = ? AND o.fiabilo_tracking_code IS NOT NULL AND (LOWER(o.fiabilo_status) NOT IN ('livré', 'livrés', 'livrer', 'retourné', 'annulé', 'retour', 'refusé', 'delivered', 'returned') OR o.fiabilo_status IS NULL) AND (o.fiabilo_last_sync IS NULL OR o.fiabilo_last_sync < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) ORDER BY o.created_at DESC LIMIT 20");
-        $syncSt->execute([$uid]);
-        $ordersToSync = $syncSt->fetchAll();
-        foreach ($ordersToSync as $order) {
-            $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
-            if (isset($statusRes['error'])) {
-                $syncErrors[] = $order['fiabilo_tracking_code'] . ': ' . $statusRes['error'];
-                continue;
-            }
-            if (isset($statusRes['etat']) && $statusRes['etat'] !== $order['fiabilo_status']) {
-                $status = $statusRes['etat'];
-                $tsCol = null;
-                
-                // Flexible mapping for timestamps
-                $statusLower = mb_strtolower($status);
-                $deliveredStatuses = ['livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree'];
-                $shippingStatuses = ['en cours', 'en cours de livraison', 'expédié', 'shipping', 'shipped', 'en cours transit'];
-                $returnedStatuses = ['retourné', 'annulé', 'retour', 'refusé', 'returned', 'cancelled', 'rtn definit', 'rtn', 'echouée', 'annulée', 'refusée', 'retourne', 'rtn depot', 'a verifier', 'rtn definitif', 'rtn client/agence', 'retour expediteur', 'retour recu'];
-                
-                if (in_array($statusLower, $deliveredStatuses)) {
-                    $tsCol = 'delivered_at';
-                } elseif (in_array($statusLower, $returnedStatuses)) {
-                    $tsCol = 'returned_at';
-                } elseif (in_array($statusLower, $shippingStatuses)) {
-                    $tsCol = 'shipped_at';
-                }
-                
-                $sql = "UPDATE orders SET fiabilo_status = :fiabilo_status, fiabilo_last_sync = NOW()";
-                if ($tsCol) $sql .= ", $tsCol = NOW()";
-                $sql .= " WHERE id = :id";
-                $app->pdo->prepare($sql)->execute(['fiabilo_status' => $status, 'id' => $order['id']]);
-                $syncCount++;
-            }
-        }
-    }
-}
-
 ensurePdoAlive($app);
 
 // Metrics Calculation (Action-Based Filtering)
@@ -141,20 +100,41 @@ $st = $app->pdo->prepare("
         SUM(CASE WHEN (LOWER(o.fiabilo_status) IN ('livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree')) AND DATE(o.delivered_at) >= :start AND DATE(o.delivered_at) <= :end THEN COALESCE(o.total, 0) ELSE 0 END) as delivered_api_rev,
         
         -- Pipeline Snapshot (Transient states: ready & out for delivery)
-        SUM(CASE WHEN (o.fiabilo_status IS NULL OR o.fiabilo_status = 'En attente' OR o.fiabilo_status = '') AND o.fiabilo_tracking_code IS NOT NULL THEN 1 ELSE 0 END) as ready_pickup,
-        SUM(CASE WHEN (LOWER(o.fiabilo_status) IN ('en cours', 'en cours de livraison', 'expédié', 'shipping', 'shipped', 'en cours transit')) THEN 1 ELSE 0 END) as out_for_delivery,
+        SUM(CASE WHEN o.fiabilo_tracking_code IS NOT NULL AND (
+            o.fiabilo_status IS NULL OR o.fiabilo_status = '' OR
+            LOWER(o.fiabilo_status) LIKE '%attente%' OR LOWER(o.fiabilo_status) LIKE '%enlev%' OR LOWER(o.fiabilo_status) LIKE '%assign%'
+        ) THEN 1 ELSE 0 END) as ready_pickup,
+        SUM(CASE WHEN (
+            LOWER(o.fiabilo_status) LIKE '%cours%' OR LOWER(o.fiabilo_status) LIKE '%livraison%' OR
+            (LOWER(o.fiabilo_status) LIKE '%expedi%' AND LOWER(o.fiabilo_status) NOT LIKE '%expediteur%') OR
+            LOWER(o.fiabilo_status) IN ('shipping', 'shipped')
+        ) THEN 1 ELSE 0 END) as out_for_delivery,
         
         -- Terminal Snapshot (Terminal states: delivered & returned & warehouse)
-        SUM(CASE WHEN (LOWER(o.fiabilo_status) IN ('livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree')) THEN 1 ELSE 0 END) as delivered_count,
         SUM(CASE WHEN (
-            LOWER(o.fiabilo_status) IN ('retourné', 'annulé', 'retour', 'refusé', 'returned', 'cancelled', 'rtn definit', 'rtn', 'echouée', 'annulée', 'refusée', 'retourne', 'rtn depot', 'rtn definitif', 'a verifier', 'rtn client/agence', 'retour expediteur', 'retour recu')
-            OR LOWER(o.fiabilo_status) LIKE 'retour%'
-            OR LOWER(o.fiabilo_status) LIKE 'rtn%'
+            (LOWER(o.fiabilo_status) LIKE '%livr%' AND LOWER(o.fiabilo_status) NOT LIKE '%non livr%')
+            OR LOWER(o.fiabilo_status) IN ('delivered', 'reçu', 'recu', 'livree')
+        ) THEN 1 ELSE 0 END) as delivered_count,
+        SUM(CASE WHEN (
+            LOWER(o.fiabilo_status) LIKE '%retour%'
+            OR LOWER(o.fiabilo_status) LIKE '%rtn%'
+            OR LOWER(o.fiabilo_status) LIKE '%refus%'
+            OR LOWER(o.fiabilo_status) LIKE '%annul%'
+            OR LOWER(o.fiabilo_status) LIKE '%echou%'
+            OR LOWER(o.fiabilo_status) LIKE '%supprim%'
+            OR LOWER(o.fiabilo_status) LIKE '%verifier%'
         ) THEN 1 ELSE 0 END) as returned_count,
-        SUM(CASE WHEN (LOWER(o.fiabilo_status) IN ('au magasin', 'magasin', 'entrepôt', 'depot', 'warehouse', 'aramé')) THEN 1 ELSE 0 END) as warehouse_count,
+        SUM(CASE WHEN (
+            LOWER(o.fiabilo_status) LIKE '%magasin%' OR LOWER(o.fiabilo_status) LIKE '%entrepot%' OR
+            LOWER(o.fiabilo_status) LIKE '%depot%' OR LOWER(o.fiabilo_status) LIKE '%warehouse%' OR
+            LOWER(o.fiabilo_status) LIKE '%centre%' OR LOWER(o.fiabilo_status) LIKE '%transfert%'
+        ) THEN 1 ELSE 0 END) as warehouse_count,
         
         -- Real-time counter for delivered today (respecting reset)
-        SUM(CASE WHEN (LOWER(o.fiabilo_status) IN ('livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree')) AND (:lastReset IS NULL OR o.delivered_at >= :lastReset) THEN 1 ELSE 0 END) as delivered_count_realtime
+        SUM(CASE WHEN (
+            (LOWER(o.fiabilo_status) LIKE '%livr%' AND LOWER(o.fiabilo_status) NOT LIKE '%non livr%')
+            OR LOWER(o.fiabilo_status) IN ('delivered', 'reçu', 'recu', 'livree')
+        ) AND (:lastReset IS NULL OR o.delivered_at >= :lastReset) THEN 1 ELSE 0 END) as delivered_count_realtime
     FROM orders o JOIN shops s ON o.shop_id = s.id 
     WHERE s.user_id = :uid
 ");

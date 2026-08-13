@@ -8,35 +8,8 @@ $perPage = 50;
 $offset = ($pageNum - 1) * $perPage;
 $search = trim($_GET['search'] ?? '');
 
-// --- REAL-TIME SYNC (Fresh data for "Today" analytics) ---
-$stInt = $app->pdo->prepare("SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = 'fiabilo'");
-$stInt->execute([$uid]);
-$integration = $stInt->fetch();
-
-if ($integration && !empty($integration['tracking_token_encrypted'])) {
-    $trackingToken = FiabiloHelper::decrypt($integration['tracking_token_encrypted'], $app->app['encryption_key'] ?? '');
-    if ($trackingToken) {
-        // Sync orders that were recently shipped or pending
-        $syncSt = $app->pdo->prepare("SELECT o.id, o.fiabilo_tracking_code, o.fiabilo_status FROM orders o JOIN shops s ON o.shop_id = s.id WHERE s.user_id = ? AND o.fiabilo_tracking_code IS NOT NULL AND (LOWER(o.fiabilo_status) NOT IN ('livré', 'livrés', 'livrer', 'retourné', 'annulé', 'retour', 'refusé', 'delivered', 'returned', 'rtn definit', 'rtn depot') OR o.fiabilo_status IS NULL) ORDER BY o.created_at DESC LIMIT 50");
-        $syncSt->execute([$uid]);
-        $ordersToSync = $syncSt->fetchAll();
-        foreach ($ordersToSync as $order) {
-            $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
-            if (isset($statusRes['etat']) && $statusRes['etat'] !== $order['fiabilo_status']) {
-                $status = $statusRes['etat'];
-                $statusLower = mb_strtolower($status);
-                $deliveredStatuses = ['livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree'];
-                $returnedStatuses = ['retourné', 'annulé', 'retour', 'refusé', 'returned', 'cancelled', 'rtn definit', 'rtn', 'echouée', 'annulée', 'refusée', 'retourne', 'rtn depot', 'a verifier', 'rtn definitif', 'rtn client/agence', 'retour expediteur', 'retour recu'];
-                
-                $sql = "UPDATE orders SET fiabilo_status = ?, fiabilo_last_sync = NOW()";
-                if (in_array($statusLower, $deliveredStatuses)) $sql .= ", delivered_at = NOW()";
-                if (in_array($statusLower, $returnedStatuses)) $sql .= ", returned_at = NOW()";
-                $sql .= " WHERE id = ?";
-                $app->pdo->prepare($sql)->execute([$status, $order['id']]);
-            }
-        }
-    }
-}
+// Keep delivered/retour exact from FIABILO tracking API
+FiabiloHelper::syncUserShipments($app->pdo, $uid, $app->app['encryption_key'] ?? '', 80);
 
 // --- REAL-TIME INTIGO SYNC ---
 $stIntigo = $app->pdo->prepare("SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = 'intigo'");

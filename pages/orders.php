@@ -413,38 +413,46 @@ if (($page ?? '') === 'order-view') {
         exit;
     }
 
-    // Send to Fiabilo from the Ajouter colis form
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_fiabilo_colis'])) {
+    $isSaveColis = $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_fiabilo_colis']);
+    $isSendColis = $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_fiabilo_colis']);
+    if ($isSaveColis || $isSendColis) {
         $encKey = $app->app['encryption_key'] ?? '';
         $postedToken = trim($_POST['fiabilo_add_token'] ?? '');
         if ($postedToken !== '') {
             FiabiloHelper::saveAddToken($app->pdo, $uid, $postedToken, $encKey);
         }
+        $nom = trim($_POST['colis_nom'] ?? '');
+        $tel = trim($_POST['colis_tel'] ?? '');
+        $tel2 = trim($_POST['colis_tel2'] ?? '');
+        $gouvernorat = trim($_POST['colis_gouvernorat'] ?? '');
+        $ville = trim($_POST['colis_ville'] ?? '');
+        $localite = trim($_POST['colis_localite'] ?? '');
+        $adresse = trim($_POST['colis_adresse'] ?? '');
+        $designation = trim($_POST['colis_designation'] ?? '');
+        $prix = OrderPricing::parseMoney($_POST['colis_prix'] ?? null);
+        $nbArticle = max(1, (int) ($_POST['colis_nb_article'] ?? 1));
+        $nbColis = max(1, (int) ($_POST['colis_nb_colis'] ?? 1));
+        $ouvrir = (($_POST['colis_ouvrir'] ?? 'Non') === 'Oui') ? 'Oui' : 'Non';
+
+        $app->pdo->prepare('UPDATE orders SET billing_name = ?, billing_phone = ?, phone = ?, billing_address = ?, shipping_address = ?, billing_city = ?, shipping_city = ?, billing_country = ?, billing_zip = ?, total = COALESCE(?, total), confirmed = 1, follow_up = 0, status = ? WHERE id = ?')
+            ->execute([
+                $nom, $tel, $tel2 !== '' ? $tel2 : $tel, $adresse, $adresse, $ville, $ville,
+                $gouvernorat, $localite, $prix, 'confirmed', $id,
+            ]);
+        $st->execute([$id, $uid]);
+        $order = $st->fetch() ?: $order;
+
+        if ($isSaveColis) {
+            header('Location: index.php?page=order-view&id=' . $id . '&saved=1&ship=1');
+            exit;
+        }
+
         $addToken = FiabiloHelper::resolveAddToken($app->pdo, $uid, $encKey);
         if ($addToken === '') {
             $message = '<div class="alert alert-error">FIABILO add token missing. Paste the API d\'ajout in the form and try again.</div>';
         } elseif (!empty($order['fiabilo_tracking_code'])) {
             $message = '<div class="alert alert-error">This order is already sent to FIABILO.</div>';
         } else {
-            $nom = trim($_POST['colis_nom'] ?? '');
-            $tel = trim($_POST['colis_tel'] ?? '');
-            $tel2 = trim($_POST['colis_tel2'] ?? '');
-            $gouvernorat = trim($_POST['colis_gouvernorat'] ?? '');
-            $ville = trim($_POST['colis_ville'] ?? '');
-            $localite = trim($_POST['colis_localite'] ?? '');
-            $adresse = trim($_POST['colis_adresse'] ?? '');
-            $designation = trim($_POST['colis_designation'] ?? '');
-            $prix = OrderPricing::parseMoney($_POST['colis_prix'] ?? null);
-            $nbArticle = max(1, (int) ($_POST['colis_nb_article'] ?? 1));
-            $nbColis = max(1, (int) ($_POST['colis_nb_colis'] ?? 1));
-            $ouvrir = (($_POST['colis_ouvrir'] ?? 'Non') === 'Oui') ? 'Oui' : 'Non';
-
-            $app->pdo->prepare('UPDATE orders SET billing_name = ?, billing_phone = ?, phone = ?, billing_address = ?, shipping_address = ?, billing_city = ?, shipping_city = ?, billing_country = ?, billing_zip = ?, total = COALESCE(?, total), confirmed = 1, follow_up = 0, status = ? WHERE id = ?')
-                ->execute([
-                    $nom, $tel, $tel2 !== '' ? $tel2 : $tel, $adresse, $adresse, $ville, $ville,
-                    $gouvernorat, $localite, $prix, 'confirmed', $id,
-                ]);
-
             $payload = [
                 'nom' => $nom,
                 'tel' => $tel,
@@ -507,16 +515,13 @@ if (($page ?? '') === 'order-view') {
     // Fetch live tracking history if tracking code exists
     $trackingHistory = [];
     if (!empty($order['fiabilo_tracking_code'])) {
-        $stFiab = $app->pdo->prepare('SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
-        $stFiab->execute([$uid, 'fiabilo']);
-        $intFiab = $stFiab->fetch();
-        if ($intFiab && !empty($intFiab['tracking_token_encrypted'])) {
-            $trackingToken = FiabiloHelper::decrypt($intFiab['tracking_token_encrypted'], $app->app['encryption_key'] ?? '');
-            if ($trackingToken) {
-                $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
-                if (isset($statusRes['historique'])) {
-                    $trackingHistory = $statusRes['historique'];
-                }
+        $trackingToken = FiabiloHelper::resolveTrackingToken($app->pdo, $uid, $app->app['encryption_key'] ?? '');
+        if ($trackingToken) {
+            $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
+            if (isset($statusRes['etat'])) {
+                FiabiloHelper::applyStatusUpdate($app->pdo, $id, (string) $statusRes['etat'], $order['fiabilo_status'] ?? null);
+                $order['fiabilo_status'] = $statusRes['etat'];
+                $trackingHistory = $statusRes['historique'] ?? [];
             }
         }
     } elseif (!empty($order['intigo_tracking_code'])) {
@@ -1085,7 +1090,7 @@ if (($page ?? '') === 'order-view') {
     }
     $tokenField = $fiabiloAddTokenReady
         ? '<p class="colis-hint">FIABILO add token is saved. Dispatch will use it.</p>'
-        : '<div class="form-group"><label>API d\'ajout FIABILO</label><input type="password" name="fiabilo_add_token" placeholder="souqvibes-..." required></div>';
+        : '<div class="form-group"><label>API d\'ajout FIABILO</label><input type="password" name="fiabilo_add_token" placeholder="souqvibes-..."></div>';
 
     $content .= '
     <div id="fiabilo-colis-modal" class="modal-modern" style="display:none;">
@@ -1095,7 +1100,6 @@ if (($page ?? '') === 'order-view') {
                 <button type="button" class="close-modal-btn" onclick="closeFiabiloColisModal()">&times;</button>
             </div>
             <form method="post" class="modal-form-modern" id="fiabilo-colis-form">
-                <input type="hidden" name="send_fiabilo_colis" value="1">
                 <div class="modal-body-grid" style="grid-template-columns:1fr; overflow-y:auto;">
                     <h4>Informations client</h4>
                     <div class="form-group"><label>Nom complet</label><input type="text" name="colis_nom" required value="' . htmlspecialchars($order['billing_name'] ?? '') . '"></div>
@@ -1124,7 +1128,8 @@ if (($page ?? '') === 'order-view') {
                 </div>
                 <div class="modal-footer-modern">
                     <button type="button" onclick="closeFiabiloColisModal()" class="btn-react btn-secondary">Annuler</button>
-                    <button type="submit" class="btn-react btn-primary">Envoyer à FIABILO</button>
+                    <button type="submit" name="save_fiabilo_colis" value="1" class="btn-react btn-secondary" formnovalidate>Save</button>
+                    <button type="submit" name="send_fiabilo_colis" value="1" class="btn-react btn-primary">Envoyer à FIABILO</button>
                 </div>
             </form>
         </div>
@@ -1135,6 +1140,8 @@ if (($page ?? '') === 'order-view') {
     #fiabilo-colis-modal .form-group input, #fiabilo-colis-modal .form-group select { width:100%; padding:0.7rem 0.85rem; border:1px solid #e2e8f0; border-radius:0.7rem; font-weight:600; }
     #fiabilo-colis-modal h4 { margin: 0.25rem 0 0.75rem; font-size:0.8rem; letter-spacing:0.04em; text-transform:uppercase; color:#0f172a; }
     .colis-hint { font-size:0.8rem; color:#16a34a; font-weight:600; margin:0.5rem 0 0; }
+    #fiabilo-colis-modal .modal-footer-modern { flex-wrap: wrap; }
+    #fiabilo-colis-modal .modal-footer-modern .btn-react { min-height: 42px; }
     </style>
     ';
 
@@ -1578,6 +1585,9 @@ unset($_SESSION['import_results']);
 // Orders list (all / confirmed / follow up)
 $currentPage = $page ?? 'orders';
 $pageTitle = $currentPage === 'orders-confirmed' ? 'Confirmed orders' : ($currentPage === 'orders-followup' ? 'Follow up' : 'All orders');
+
+// Refresh FIABILO tracking so En attente / Enlever catch up to Livrer / Retour
+FiabiloHelper::syncUserShipments($app->pdo, $uid, $app->app['encryption_key'] ?? '', 70);
 
 OrderPricing::restoreProductPricesFromOrders($app->pdo, $uid);
 OrderPricing::restoreZeroOrderTotals($app->pdo, $uid);
@@ -2070,6 +2080,13 @@ if ($currentPage === 'orders-confirmed') {
 // Table
 $truckSvg = '<svg class="ship-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7h11v10H3V7Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M14 10h4l3 3v4h-7v-7Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M7 17a2 2 0 1 0 0 4a2 2 0 0 0 0-4Z" stroke="currentColor" stroke-width="2"/><path d="M17 17a2 2 0 1 0 0 4a2 2 0 0 0 0-4Z" stroke="currentColor" stroke-width="2"/><path d="M5 21h2M15 21h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
+$content .= '<div class="mobile-select-all-bar">
+  <label>
+    <input type="checkbox" id="select-all-mobile" title="Select all">
+    <span>Select orders</span>
+  </label>
+</div>';
+
 $content .= '<table class="orders-table"><thead><tr>';
 $content .= '<th><input type="checkbox" id="select-all" title="Select all"></th>';
 $content .= '<th>Order</th><th>Customer</th><th>Phone</th><th>Shop</th><th>Date</th>';
@@ -2103,21 +2120,17 @@ foreach ($orders as $o) {
         'shipping' => '<span class="badge badge-shipping">Assigned to Shipping</span>',
     ];
     
-    // For orders with fiabilo_status, show the actual shipping status
-    $deliveredList = ['Livré', 'Livrés', 'Livrer', 'Delivered', 'Reçu'];
-    $returnedList = ['Rtn definitif', 'Retour', 'Returned', 'Annulé'];
-    $inProgressList = ['En attente', 'En cours', 'Au depot', 'Au dépôt', 'En livraison'];
-    
+    // For orders with fiabilo_status, show the exact shipping status (fuzzy classes)
     if (!empty($o['fiabilo_status'])) {
         $fiabiloStatus = $o['fiabilo_status'];
-        if (in_array($fiabiloStatus, $deliveredList)) {
+        $class = FiabiloHelper::classifyStatus($fiabiloStatus);
+        if ($class === 'delivered') {
             $statusBadge = '<div class="status-confirmed-new">' . $checkIcon . ' ' . htmlspecialchars($fiabiloStatus) . '</div>';
-        } elseif (in_array($fiabiloStatus, $returnedList)) {
+        } elseif ($class === 'returned' || $class === 'deleted') {
             $statusBadge = '<span class="badge badge-danger" style="background:#fee2e2; color:#dc2626; border:1px solid #fecaca;">' . htmlspecialchars($fiabiloStatus) . '</span>';
-        } elseif (in_array($fiabiloStatus, $inProgressList)) {
+        } elseif ($class === 'shipping' || $class === 'warehouse' || $class === 'pending') {
             $statusBadge = '<span class="badge badge-info" style="background:#dbeafe; color:#2563eb; border:1px solid #bfdbfe;">' . htmlspecialchars($fiabiloStatus) . '</span>';
         } else {
-            // Show actual status from shipping company
             $statusBadge = '<span class="badge badge-shipping">' . htmlspecialchars($fiabiloStatus) . '</span>';
         }
     } else {
@@ -2133,7 +2146,7 @@ foreach ($orders as $o) {
     $shopName = htmlspecialchars($o['shop_name'] ?? '—');
     
     $content .= '<tr class="order-row">';
-    $content .= '<td class="col-checkbox"><input type="checkbox" name="order_ids[]" value="' . $o['id'] . '" class="order-cb" data-items="' . $itemCount . '"></td>';
+    $content .= '<td class="col-checkbox" onclick="event.stopPropagation();"><input type="checkbox" name="order_ids[]" value="' . $o['id'] . '" class="order-cb" data-items="' . $itemCount . '"></td>';
     $content .= '<td class="col-name" data-label="Order">
         <div class="order-main-info">
             <a href="index.php?page=order-view&id=' . $o['id'] . '&from=' . $currentPage . '" class="order-link">' . htmlspecialchars($o['name']) . '</a>';
@@ -2282,20 +2295,26 @@ window.closeTrackingModal = function(event) {
 };
 
 document.addEventListener("DOMContentLoaded", function() {
-    var selectAll = document.getElementById("select-all");
+    var selectAllBoxes = [document.getElementById("select-all"), document.getElementById("select-all-mobile")].filter(Boolean);
     var checkboxes = document.querySelectorAll(".order-cb");
     var bulkBar = document.getElementById("bulk-action-bar");
     var countSpan = document.getElementById("selected-count");
+    
+    function setSelectAllChecked(checked) {
+        selectAllBoxes.forEach(function(el) { el.checked = checked; });
+    }
     
     function updateBulkBar() {
         var checked = document.querySelectorAll(".order-cb:checked").length;
         if (countSpan) countSpan.textContent = checked;
         if (bulkBar) bulkBar.style.display = checked > 0 ? "flex" : "none";
+        setSelectAllChecked(checkboxes.length > 0 && checked === checkboxes.length);
     }
     
-    if (selectAll) {
+    selectAllBoxes.forEach(function(selectAll) {
         selectAll.addEventListener("change", function() {
             checkboxes.forEach(function(cb) { cb.checked = selectAll.checked; });
+            setSelectAllChecked(selectAll.checked);
             updateBulkBar();
         });
         
@@ -2305,9 +2324,10 @@ document.addEventListener("DOMContentLoaded", function() {
                 checkboxes[0].focus();
             }
         });
-    }
+    });
     
     checkboxes.forEach(function(cb, index) {
+        cb.addEventListener("click", function(e) { e.stopPropagation(); });
         cb.addEventListener("change", updateBulkBar);
         
         cb.addEventListener("keydown", function(e) {
@@ -2316,9 +2336,9 @@ document.addEventListener("DOMContentLoaded", function() {
                     if (index > 0) {
                         e.preventDefault();
                         checkboxes[index - 1].focus();
-                    } else if (selectAll) {
+                    } else if (selectAllBoxes[0]) {
                         e.preventDefault();
-                        selectAll.focus();
+                        selectAllBoxes[0].focus();
                     }
                 } else {
                     if (index < checkboxes.length - 1) {

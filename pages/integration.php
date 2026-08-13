@@ -16,11 +16,20 @@ $hasFiabilo = $fiabiloRow && !empty($fiabiloRow['add_token_encrypted']);
 
 // Check Intigo integration status
 $stIntigo = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+$stIntigo->execute([$uid, 'intigo']);
 $intigoRow = $stIntigo->fetch();
 $hasIntigo = $intigoRow && !empty($intigoRow['add_token_encrypted']) && !empty($intigoRow['tracking_token_encrypted']);
 $isIntigoSandbox = ($intigoRow['api_mode'] ?? 'prod') === 'sandbox';
 
 $encryptionKey = $app->app['encryption_key'] ?? '';
+
+// Ensure env tracking token is stored so sync always has the etat API key
+$envTrack = trim((string) (getenv('FIABILO_TRACKING_TOKEN') ?: ''));
+if ($envTrack !== '' && (empty($fiabiloRow['tracking_token_encrypted']) || FiabiloHelper::decrypt($fiabiloRow['tracking_token_encrypted'] ?? '', $encryptionKey) === '')) {
+    FiabiloHelper::saveTrackingToken($app->pdo, $uid, $envTrack, $encryptionKey);
+    $stFiabilo->execute([$uid, 'fiabilo']);
+    $fiabiloRow = $stFiabilo->fetch();
+}
 
 // Auto-generate token for shops that don't have one
 foreach ($allShops as &$s) {
@@ -38,18 +47,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['save_fiabilo'])) {
         $addToken = trim($_POST['add_token'] ?? '');
         $trackingToken = trim($_POST['tracking_token'] ?? '');
-        if ($addToken !== '') {
-            try {
-                $addEnc = FiabiloHelper::encrypt($addToken, $encryptionKey);
-                $trackEnc = $trackingToken !== ''
-                    ? FiabiloHelper::encrypt($trackingToken, $encryptionKey)
-                    : ($fiabiloRow['tracking_token_encrypted'] ?? '');
-                $app->pdo->prepare('INSERT INTO user_integrations (user_id, provider, add_token_encrypted, tracking_token_encrypted) VALUES (?, ?, ?, ?) 
-                    ON DUPLICATE KEY UPDATE add_token_encrypted = VALUES(add_token_encrypted), tracking_token_encrypted = IF(VALUES(tracking_token_encrypted) = "", tracking_token_encrypted, VALUES(tracking_token_encrypted))')
-                    ->execute([$uid, 'fiabilo', $addEnc, $trackEnc]);
-                $hasFiabilo = true;
-            } catch (Throwable $e) {}
-        }
+        try {
+            if ($addToken !== '') {
+                FiabiloHelper::saveAddToken($app->pdo, $uid, $addToken, $encryptionKey);
+            }
+            if ($trackingToken !== '') {
+                FiabiloHelper::saveTrackingToken($app->pdo, $uid, $trackingToken, $encryptionKey);
+            }
+            // Allow saving tracking-only when add already exists
+            if ($addToken !== '' || $trackingToken !== '' || !empty($fiabiloRow['add_token_encrypted'])) {
+                $stFiabilo->execute([$uid, 'fiabilo']);
+                $fiabiloRow = $stFiabilo->fetch();
+                $hasFiabilo = $fiabiloRow && !empty($fiabiloRow['add_token_encrypted']);
+            }
+        } catch (Throwable $e) {}
     } elseif (isset($_POST['delete_fiabilo'])) {
         $app->pdo->prepare('DELETE FROM user_integrations WHERE user_id = ? AND provider = ?')->execute([$uid, 'fiabilo']);
         $hasFiabilo = false;

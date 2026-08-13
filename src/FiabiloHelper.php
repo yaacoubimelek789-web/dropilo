@@ -122,6 +122,253 @@ class FiabiloHelper
             ->execute([$userId, 'fiabilo', $addEnc, $trackEnc]);
     }
 
+    public static function resolveTrackingToken(PDO $pdo, int $userId, string $encryptionKey): string
+    {
+        $st = $pdo->prepare('SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+        $st->execute([$userId, 'fiabilo']);
+        $row = $st->fetch();
+        if ($row && !empty($row['tracking_token_encrypted'])) {
+            $token = self::decrypt($row['tracking_token_encrypted'], $encryptionKey);
+            if ($token !== '') {
+                return $token;
+            }
+        }
+        return trim((string) (getenv('FIABILO_TRACKING_TOKEN') ?: ''));
+    }
+
+    public static function saveTrackingToken(PDO $pdo, int $userId, string $token, string $encryptionKey): void
+    {
+        $token = trim($token);
+        if ($token === '') {
+            return;
+        }
+        $trackEnc = self::encrypt($token, $encryptionKey);
+        $st = $pdo->prepare('SELECT add_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+        $st->execute([$userId, 'fiabilo']);
+        $existing = $st->fetch();
+        $addEnc = $existing['add_token_encrypted'] ?? '';
+        $pdo->prepare('INSERT INTO user_integrations (user_id, provider, add_token_encrypted, tracking_token_encrypted) VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE tracking_token_encrypted = VALUES(tracking_token_encrypted)')
+            ->execute([$userId, 'fiabilo', $addEnc, $trackEnc]);
+    }
+
+    /** Normalize Fiabilo status for comparisons (accents, case, punctuation). */
+    public static function normalizeStatus(?string $status): string
+    {
+        $s = mb_strtolower(trim((string) $status), 'UTF-8');
+        if ($s === '') {
+            return '';
+        }
+        $map = [
+            'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e',
+            'à' => 'a', 'â' => 'a', 'ä' => 'a',
+            'ù' => 'u', 'û' => 'u', 'ü' => 'u',
+            'ô' => 'o', 'ö' => 'o',
+            'î' => 'i', 'ï' => 'i',
+            'ç' => 'c',
+        ];
+        $s = strtr($s, $map);
+        $s = preg_replace('/\s+/', ' ', $s) ?? $s;
+        return $s;
+    }
+
+    /**
+     * Classify a Fiabilo etat into: delivered|returned|shipping|pending|warehouse|deleted|unknown
+     * Handles typos like "enlever", "enleve", "enlevement", "livrer", "retour expediteur", etc.
+     */
+    public static function classifyStatus(?string $status): string
+    {
+        $s = self::normalizeStatus($status);
+        if ($s === '') {
+            return 'unknown';
+        }
+
+        if (str_contains($s, 'supprim') || $s === 'delete' || $s === 'deleted') {
+            return 'deleted';
+        }
+
+        // Returns / refusals / cancelled FIRST (before "expedi" matches Retour Expediteur)
+        if (
+            str_contains($s, 'retour')
+            || str_contains($s, 'rtn')
+            || str_contains($s, 'refus')
+            || str_contains($s, 'annul')
+            || str_contains($s, 'cancel')
+            || str_contains($s, 'echou')
+            || str_contains($s, 'a verifier')
+            || str_contains($s, 'verifier')
+            || str_contains($s, 'lost')
+            || str_contains($s, 'perdu')
+        ) {
+            return 'returned';
+        }
+
+        // Out for delivery / in transit BEFORE generic "livr*" (avoids matching "livraison")
+        if (
+            str_contains($s, 'livraison')
+            || str_contains($s, 'cours')
+            || (str_contains($s, 'expedi') && !str_contains($s, 'expediteur'))
+            || str_contains($s, 'ship')
+            || str_contains($s, 'transit')
+        ) {
+            return 'shipping';
+        }
+
+        // Delivered — avoid matching "non livre" / "pas livre"
+        if (
+            preg_match('/\b(livre|livrer|livres|livree|livres?)\b/u', $s)
+            || str_contains($s, 'delivered')
+            || $s === 'recu'
+            || str_contains($s, 'recue')
+        ) {
+            return 'delivered';
+        }
+
+        // Warehouse / hub
+        if (
+            str_contains($s, 'magasin')
+            || str_contains($s, 'entrepot')
+            || str_contains($s, 'depot')
+            || str_contains($s, 'warehouse')
+            || str_contains($s, 'centre')
+            || str_contains($s, 'transfert')
+            || str_contains($s, 'arame')
+        ) {
+            return 'warehouse';
+        }
+
+        // Pickup / assigned / waiting — includes "enlever", "enleve", "enlevement"
+        if (
+            str_contains($s, 'enlev')
+            || str_contains($s, 'attente')
+            || str_contains($s, 'assign')
+            || str_contains($s, 'pending')
+            || str_contains($s, 'pickup')
+            || str_contains($s, 'ramass')
+        ) {
+            return 'pending';
+        }
+
+        return 'unknown';
+    }
+
+    public static function isTerminalStatus(?string $status): bool
+    {
+        $class = self::classifyStatus($status);
+        return in_array($class, ['delivered', 'returned', 'deleted'], true);
+    }
+
+    /**
+     * Persist a Fiabilo status onto an order row (timestamps + last_sync).
+     * Returns true when the stored status text changed.
+     */
+    public static function applyStatusUpdate(PDO $pdo, int $orderId, string $status, ?string $previous = null): bool
+    {
+        $status = trim($status);
+        if ($status === '') {
+            return false;
+        }
+
+        $class = self::classifyStatus($status);
+        $changed = $previous === null || trim((string) $previous) !== $status;
+
+        $sql = 'UPDATE orders SET fiabilo_status = ?, fiabilo_last_sync = NOW()';
+        $params = [$status];
+
+        if ($class === 'delivered') {
+            $sql .= ', delivered_at = COALESCE(delivered_at, NOW()), status = ?';
+            $params[] = 'shipping';
+        } elseif ($class === 'returned' || $class === 'deleted') {
+            $sql .= ', returned_at = COALESCE(returned_at, NOW()), status = ?';
+            $params[] = 'shipping';
+        } elseif ($class === 'shipping' || $class === 'warehouse') {
+            $sql .= ', shipped_at = COALESCE(shipped_at, NOW()), status = ?';
+            $params[] = 'shipping';
+        } elseif ($class === 'pending') {
+            $sql .= ', status = ?';
+            $params[] = 'shipping';
+        }
+
+        $sql .= ' WHERE id = ?';
+        $params[] = $orderId;
+        $pdo->prepare($sql)->execute($params);
+
+        return $changed;
+    }
+
+    /**
+     * Sync non-terminal Fiabilo shipments for a user.
+     * Oldest / never-synced first so stuck "En attente" / "Enlever" don't stay forever.
+     *
+     * @return array{checked:int,updated:int,errors:array<int,string>}
+     */
+    public static function syncUserShipments(PDO $pdo, int $userId, string $encryptionKey, int $limit = 80, bool $force = false): array
+    {
+        $result = ['checked' => 0, 'updated' => 0, 'errors' => []];
+        $token = self::resolveTrackingToken($pdo, $userId, $encryptionKey);
+        if ($token === '') {
+            $result['errors'][] = 'Missing FIABILO tracking token';
+            return $result;
+        }
+
+        $limit = max(1, min(200, $limit));
+        $staleSql = $force
+            ? ''
+            : ' AND (o.fiabilo_last_sync IS NULL OR o.fiabilo_last_sync < DATE_SUB(NOW(), INTERVAL 2 MINUTE))';
+
+        // Pull candidates; filter terminal in PHP with fuzzy classifier (exact SQL lists miss "Retour Expediteur", "Enlever", etc.)
+        $sql = "SELECT o.id, o.fiabilo_tracking_code, o.fiabilo_status
+            FROM orders o
+            JOIN shops s ON o.shop_id = s.id
+            WHERE s.user_id = ?
+              AND o.fiabilo_tracking_code IS NOT NULL
+              AND o.fiabilo_tracking_code != ''
+              $staleSql
+            ORDER BY (o.fiabilo_last_sync IS NULL) DESC, o.fiabilo_last_sync ASC, o.id DESC
+            LIMIT " . (int) ($limit * 3);
+
+        $st = $pdo->prepare($sql);
+        $st->execute([$userId]);
+        $candidates = $st->fetchAll();
+
+        $toSync = [];
+        foreach ($candidates as $row) {
+            if (self::isTerminalStatus($row['fiabilo_status'] ?? null)) {
+                // Still refresh terminal occasionally if never synced recently and force/stale
+                continue;
+            }
+            $toSync[] = $row;
+            if (count($toSync) >= $limit) {
+                break;
+            }
+        }
+
+        foreach ($toSync as $order) {
+            $result['checked']++;
+            $code = (string) $order['fiabilo_tracking_code'];
+            $statusRes = self::getStatus($token, $code);
+            if (isset($statusRes['error'])) {
+                // Mark sync attempt so one bad code doesn't block the queue forever
+                $pdo->prepare('UPDATE orders SET fiabilo_last_sync = NOW() WHERE id = ?')->execute([(int) $order['id']]);
+                $result['errors'][] = $code . ': ' . $statusRes['error'];
+                continue;
+            }
+            if (!isset($statusRes['etat'])) {
+                $pdo->prepare('UPDATE orders SET fiabilo_last_sync = NOW() WHERE id = ?')->execute([(int) $order['id']]);
+                continue;
+            }
+            $etat = (string) $statusRes['etat'];
+            if (self::applyStatusUpdate($pdo, (int) $order['id'], $etat, $order['fiabilo_status'] ?? null)) {
+                $result['updated']++;
+            } else {
+                // Same text — still bump last_sync so we rotate to older stuck packages
+                $pdo->prepare('UPDATE orders SET fiabilo_last_sync = NOW() WHERE id = ?')->execute([(int) $order['id']]);
+            }
+        }
+
+        return $result;
+    }
+
     /**
      * Send order to Fiabilo (Add API).
      * Returns ['tracking_code' => '...'] on success or ['error' => '...'].

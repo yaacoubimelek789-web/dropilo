@@ -23,20 +23,16 @@ $progressStep = 1;
 $isRefused = false;
 
 // Fetch live FIABILO tracking if applicable
-$st = $app->pdo->prepare('SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
-$st->execute([$uid, 'fiabilo']);
-$int = $st->fetch();
-
-if ($int && !empty($int['tracking_token_encrypted'])) {
-    $trackingToken = FiabiloHelper::decrypt($int['tracking_token_encrypted'], $app->app['encryption_key'] ?? '');
-    if ($trackingToken && !empty($order['fiabilo_tracking_code'])) {
-        $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
-        if (isset($statusRes['etat'])) {
-            $liveStatus = $statusRes['etat'];
-            $trackingHistory = $statusRes['historique'] ?? [];
-            $livreur = $statusRes['livreur'] ?? $livreur;
-            $livreurTel = $statusRes['livreur_tel'] ?? $livreurTel;
-        }
+$trackingToken = FiabiloHelper::resolveTrackingToken($app->pdo, $uid, $app->app['encryption_key'] ?? '');
+if ($trackingToken && !empty($order['fiabilo_tracking_code'])) {
+    $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
+    if (isset($statusRes['etat'])) {
+        $liveStatus = $statusRes['etat'];
+        $trackingHistory = $statusRes['historique'] ?? [];
+        $livreur = $statusRes['livreur'] ?? $livreur;
+        $livreurTel = $statusRes['livreur_tel'] ?? $livreurTel;
+        FiabiloHelper::applyStatusUpdate($app->pdo, $orderId, $liveStatus, $order['fiabilo_status'] ?? null);
+        $order['fiabilo_status'] = $liveStatus;
     }
 }
 

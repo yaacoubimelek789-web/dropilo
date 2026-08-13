@@ -7,10 +7,10 @@ $currentPage = 'dashboard'; // Keep dashboard highlighted in sidebar
 
 // Map friendly status to shipping status strings (Common for both)
 $statusMap = [
-    'pending'   => ['En attente', 'Assigné au livreur', 'Assigné', 'Enlèvement', null, ''],
+    'pending'   => ['En attente', 'Assigné au livreur', 'Assigné', 'Enlèvement', 'Enlevement', 'Enlever', 'Enlevé', 'Enleve', null, ''],
     'shipping'  => ['En cours', 'En cours de livraison', 'Expédié', 'Shipping', 'Shipped', 'En livraison'],
-    'delivered' => ['Livré', 'Livrés', 'Livrer', 'Delivered', 'Reçu', 'livree'],
-    'returned'  => ['Retourné', 'Annulé', 'Retour', 'Refusé', 'Returned', 'Cancelled', 'REFUSE', 'ANNULE', 'RETOUR_AU_MAGASIN', 'echouée', 'annulée', 'refusée', 'retourne', 'Annulé par admin', 'En retour définitif', 'En retour vendeur', 'Colis perdu', 'Relance', 'A verifier', 'Rtn depot', 'Rtn definitif', 'Rtn client/agence', 'Retour Expediteur', 'Retour recu'],
+    'delivered' => ['Livré', 'Livrés', 'Livrer', 'Delivered', 'Reçu', 'livree', 'Livree'],
+    'returned'  => ['Retourné', 'Annulé', 'Retour', 'Refusé', 'Returned', 'Cancelled', 'REFUSE', 'ANNULE', 'RETOUR_AU_MAGASIN', 'echouée', 'annulée', 'refusée', 'retourne', 'Annulé par admin', 'En retour définitif', 'En retour vendeur', 'Colis perdu', 'Relance', 'A verifier', 'Rtn depot', 'Rtn definitif', 'Rtn client/agence', 'Retour Expediteur', 'Retour recu', 'Supprime'],
     'warehouse' => ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé', 'En transfert vers centre', 'Entré au centre', 'En transfert', 'Vérification', 'En retour provisoire'],
 ];
 
@@ -33,53 +33,12 @@ $lastReset = $stReset->fetchColumn();
 
 // Handle Sync Action
 $syncMessage = '';
-    // --- FIABILO SYNC ---
-    $stF = $app->pdo->prepare('SELECT tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
-    $stF->execute([$uid, 'fiabilo']);
-    $intF = $stF->fetch();
-    
-    $updated = 0;
-    $errors = 0;
-
-    if ($intF && !empty($intF['tracking_token_encrypted'])) {
-        $trackingToken = FiabiloHelper::decrypt($intF['tracking_token_encrypted'], $app->app['encryption_key'] ?? '');
-        if ($trackingToken) {
-            $placeholders = implode(',', array_fill(0, count($selectedStatuses), '?'));
-            $whereClause = "s.user_id = ? AND o.fiabilo_tracking_code IS NOT NULL";
-            if ($statusKey === 'pending') {
-                $whereClause .= " AND (o.fiabilo_status IS NULL OR o.fiabilo_status = '' OR o.fiabilo_status = 'En attente')";
-            } else {
-                $whereClause .= " AND o.fiabilo_status IN ($placeholders)";
-            }
-            if ($statusKey === 'delivered' && $lastReset) $whereClause .= " AND o.fiabilo_delivered_at >= ?";
-            elseif ($statusKey === 'returned' && $lastReset) $whereClause .= " AND o.fiabilo_returned_at >= ?";
-            
-            $sql = "SELECT o.id, o.fiabilo_tracking_code, o.fiabilo_status FROM orders o JOIN shops s ON o.shop_id = s.id WHERE $whereClause";
-            $syncParams = ($statusKey === 'pending') ? [$uid] : array_merge([$uid], $selectedStatuses);
-            if (($statusKey === 'delivered' || $statusKey === 'returned') && $lastReset) $syncParams[] = $lastReset;
-            
-            $syncSt = $app->pdo->prepare($sql);
-            $syncSt->execute($syncParams);
-            $ordersToSync = $syncSt->fetchAll();
-            
-            foreach ($ordersToSync as $order) {
-                $statusRes = FiabiloHelper::getStatus($trackingToken, $order['fiabilo_tracking_code']);
-                if (isset($statusRes['etat']) && $statusRes['etat'] !== $order['fiabilo_status']) {
-                    $newStatus = $statusRes['etat'];
-                    $newStatusLower = mb_strtolower($newStatus);
-                    $tsCol = null;
-                    if (in_array($newStatusLower, ['livré', 'livrés', 'livrer', 'delivered', 'reçu'])) $tsCol = 'delivered_at';
-                    elseif (in_array($newStatusLower, ['retourné', 'annulé', 'retour', 'refusé', 'returned', 'cancelled'])) $tsCol = 'returned_at';
-                    
-                    $updSql = "UPDATE orders SET fiabilo_status = :status";
-                    if ($tsCol) $updSql .= ", $tsCol = NOW()";
-                    $updSql .= " WHERE id = :id";
-                    $app->pdo->prepare($updSql)->execute(['status' => $newStatus, 'id' => $order['id']]);
-                    $updated++;
-                }
-            }
-        }
-    }
+$syncRes = FiabiloHelper::syncUserShipments($app->pdo, $uid, $app->app['encryption_key'] ?? '', 100, !empty($_GET['force_sync']));
+$updated = (int) ($syncRes['updated'] ?? 0);
+$errors = count($syncRes['errors'] ?? []);
+if ($updated > 0 || $errors > 0) {
+    $syncMessage = '<div class="alert alert-success">Synced ' . $updated . ' FIABILO status update(s)' . ($errors ? ' (' . $errors . ' error(s))' : '') . '.</div>';
+}
 
     // --- INTIGO SYNC ---
     $stI = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
