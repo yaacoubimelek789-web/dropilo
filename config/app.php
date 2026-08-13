@@ -10,4 +10,6 @@ if ($encryptionKey === '') {
 return [
     'encryption_key' => $encryptionKey,
     'gemini_api_key' => getenv('GEMINI_API_KEY') ?: '',
+    'claude_api_key' => getenv('CLAUDE_API_KEY') ?: '',
+    'claude_api_user_email' => getenv('CLAUDE_API_USER_EMAIL') ?: '',
 ];

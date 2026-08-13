@@ -5,6 +5,10 @@ Options -Indexes
 <IfModule mod_rewrite.c>
   RewriteEngine On
 
+  # Pass the Authorization header through to PHP (used by api.php)
+  RewriteCond %{HTTP:Authorization} .
+  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
   # Deny private directories
   RewriteRule ^(config|sql|src|pages|layouts)/ - [F,L]
 

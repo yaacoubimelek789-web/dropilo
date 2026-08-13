@@ -23,6 +23,7 @@ require_once $base . '/src/GeminiHelper.php';
 require_once $base . '/src/UserDataContext.php';
 require_once $base . '/src/DropiloExport.php';
 require_once $base . '/src/DropiloImport.php';
+require_once $base . '/src/OrderPricing.php';
 
 $cfg = require $base . '/config/database.php';
 $appConfig = require $base . '/config/app.php';

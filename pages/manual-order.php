@@ -328,6 +328,11 @@ function closeProductModal(e) {
     document.getElementById("product-modal").classList.remove("active");
 }
 
+function productPrice(p) {
+    var n = parseFloat(p && p.variant_price);
+    return isNaN(n) ? 0 : n;
+}
+
 function renderModalProducts() {
     const list = document.getElementById("modal-product-list");
     const shopId = document.getElementById("mo-shop").value;
@@ -345,7 +350,7 @@ function renderModalProducts() {
                     <img src="${img}" class="selected-p-img" alt="">
                     <div class="selected-p-info">
                         <div class="selected-p-title">${p.title}</div>
-                        <div class="selected-p-price">${parseFloat(p.variant_price).toFixed(2)} TND</div>
+                        <div class="selected-p-price">${productPrice(p).toFixed(2)} TND</div>
                     </div>
                 </div>
                 <button type="button" class="modal-p-add ${inCart ? \'added\' : \'\'}" onclick="toggleProduct(${p.id})">
@@ -411,7 +416,7 @@ function renderCart() {
             if(p) {
                 let qty = cart[pid];
                 itemTotal += qty;
-                priceTotal += (parseFloat(p.variant_price) * qty);
+                priceTotal += (productPrice(p) * qty);
                 
                 let img = p.image_src ? p.image_src : "https://placehold.co/40x40?text=P";
                 html += `
@@ -419,7 +424,7 @@ function renderCart() {
                     <img src="${img}" class="selected-p-img" alt="">
                     <div class="selected-p-info">
                         <div class="selected-p-title">${p.title}</div>
-                        <div class="selected-p-price">${parseFloat(p.variant_price).toFixed(2)} TND</div>
+                        <div class="selected-p-price">${productPrice(p).toFixed(2)} TND</div>
                     </div>
                     <div class="selected-p-actions">
                         <button type="button" class="qty-btn" onclick="updateQty(${p.id}, -1)">-</button>

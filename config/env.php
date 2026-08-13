@@ -40,3 +40,29 @@ function loadEnvFile(string $path): void
         $_ENV[$name] = $value;
     }
 }
+
+function requestIsHttps(): bool
+{
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        return true;
+    }
+    if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+        return true;
+    }
+    if (!empty($_SERVER['HTTP_CF_VISITOR']) && str_contains((string) $_SERVER['HTTP_CF_VISITOR'], '"scheme":"https"')) {
+        return true;
+    }
+    $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+    $isLocal = in_array($host, ['localhost', '127.0.0.1', '::1'], true)
+        || str_starts_with($host, 'localhost:')
+        || str_starts_with($host, '127.0.0.1:');
+
+    return $host !== '' && !$isLocal;
+}
+
+function requestBaseUrl(): string
+{
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
+
+    return (requestIsHttps() ? 'https://' : 'http://') . $host;
+}

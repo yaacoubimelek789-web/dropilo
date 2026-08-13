@@ -94,9 +94,17 @@ if (($page ?? '') === 'product-import') {
         $imageSrc = trim($_POST['image_src'] ?? '');
         $variantPrice = isset($_POST['variant_price']) && $_POST['variant_price'] !== '' ? (float) str_replace(',', '.', $_POST['variant_price']) : null;
         $cost = isset($_POST['cost']) && $_POST['cost'] !== '' ? (float) str_replace(',', '.', $_POST['cost']) : null;
-        $st = $app->pdo->prepare('SELECT p.id FROM products p JOIN shops s ON p.shop_id = s.id WHERE p.id = ? AND s.user_id = ?');
+        $st = $app->pdo->prepare('SELECT p.id, p.image_src, p.variant_price, p.cost FROM products p JOIN shops s ON p.shop_id = s.id WHERE p.id = ? AND s.user_id = ?');
         $st->execute([$productId, $uid]);
-        if ($st->fetch()) {
+        $existing = $st->fetch();
+        if ($existing) {
+            $imageSrc = $imageSrc !== '' ? $imageSrc : ($existing['image_src'] ?? null);
+            if ($variantPrice === null && $existing['variant_price'] !== null) {
+                $variantPrice = (float) $existing['variant_price'];
+            }
+            if ($cost === null && $existing['cost'] !== null) {
+                $cost = (float) $existing['cost'];
+            }
             $updateSt = $app->pdo->prepare('UPDATE products SET image_src = ?, variant_price = ?, cost = ? WHERE id = ?');
             $updateSt->execute([$imageSrc ?: null, $variantPrice, $cost, $productId]);
             $message = '<div class="alert alert-success">Product updated successfully.</div>';
@@ -282,6 +290,8 @@ $filterShop = (int) ($_GET['shop_id'] ?? 0);
 $pageNum = max(1, (int)($_GET['p'] ?? 1));
 $perPage = 12; // Slightly more for the grid
 $offset = ($pageNum - 1) * $perPage;
+
+OrderPricing::restoreProductPricesFromOrders($app->pdo, $uid);
 
 // Count total
 $countSql = 'SELECT COUNT(*) FROM products p JOIN shops s ON p.shop_id = s.id WHERE s.user_id = ?';
@@ -988,8 +998,9 @@ $content .= '
     <div class="product-grid" id="productGrid">';
 
 foreach ($products as $index => $p) {
-    $salePrice = (float)$p['variant_price'];
+    $salePrice = $p['variant_price'] !== null ? (float)$p['variant_price'] : 0;
     $costPrice = $p['cost'] !== null ? (float)$p['cost'] : null;
+    $salePriceLabel = $p['variant_price'] !== null ? number_format($salePrice, 2) : '—';
     $margin = ($costPrice !== null) ? $salePrice - $costPrice : null;
     
     $marginClass = 'margin-missing';
@@ -1041,7 +1052,7 @@ foreach ($products as $index => $p) {
             <div class="pricing-grid">
                 <div class="pricing-item">
                     <span class="label">Sale Price</span>
-                    <div class="price-val">' . number_format($salePrice, 2) . '<span>TND</span></div>
+                    <div class="price-val">' . $salePriceLabel . '<span>TND</span></div>
                 </div>
                 <div class="pricing-item">
                     <span class="label">Margin</span>
@@ -1086,8 +1097,9 @@ $content .= '</div>
         <tbody>';
 
 foreach ($products as $p) {
-    $salePrice = (float)$p['variant_price'];
+    $salePrice = $p['variant_price'] !== null ? (float)$p['variant_price'] : 0;
     $costPrice = $p['cost'] !== null ? (float)$p['cost'] : null;
+    $salePriceLabel = $p['variant_price'] !== null ? number_format($salePrice, 2) : '—';
     $margin = ($costPrice !== null) ? $salePrice - $costPrice : null;
     $marginClass = 'margin-missing';
     if ($margin !== null) {
@@ -1108,7 +1120,7 @@ foreach ($products as $p) {
         <td><span class="shop-badge">' . htmlspecialchars($p['shop_name']) . '</span></td>
         <td>
             <div class="price-col-mini">
-                ' . number_format($salePrice, 2) . ' 
+                ' . $salePriceLabel . ' 
                 <span>TND</span>
             </div>
         </td>
@@ -1352,7 +1364,7 @@ function openProductInfo(p) {
                     <tr><td class="label">SKU</td><td class="val"><code>${p.variant_sku || "—"}</code></td></tr>
                     <tr><td class="label">Handle</td><td class="val"><code>${p.handle || "—"}</code></td></tr>
                     <tr><td class="label">Status</td><td class="val" style="text-transform:capitalize;">${p.status || "active"}</td></tr>
-                    <tr><td class="label">Sale Price</td><td class="val" style="color:#0f172a; font-weight:800;">${p.variant_price ? parseFloat(p.variant_price).toFixed(2) : "0.00"} TND</td></tr>
+                    <tr><td class="label">Sale Price</td><td class="val" style="color:#0f172a; font-weight:800;">${p.variant_price !== null && p.variant_price !== "" ? parseFloat(p.variant_price).toFixed(2) : "—"} TND</td></tr>
                 </table>
 
                 ${p.body_html ? `

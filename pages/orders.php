@@ -312,6 +312,14 @@ if (($page ?? '') === 'order-view') {
         exit;
     }
 
+    // Repair prices wiped to 0 by a previous empty save (visible on every device)
+    OrderPricing::restoreProductPricesFromOrders($app->pdo, $uid);
+    if ($order['total'] === null || (float) $order['total'] <= 0) {
+        OrderPricing::syncOrderTotal($app->pdo, $id, true);
+        $st->execute([$id, $uid]);
+        $order = $st->fetch() ?: $order;
+    }
+
     // Navigation Logic
     $navFrom = $_GET['from'] ?? 'orders';
     $navWhere = "WHERE s.user_id = $uid";
@@ -355,7 +363,18 @@ if (($page ?? '') === 'order-view') {
         $shippingAddress = trim($_POST['shipping_address'] ?? '');
         $shippingCity = trim($_POST['shipping_city'] ?? '');
         $shippingZip = trim($_POST['shipping_zip'] ?? '');
-        $total = isset($_POST['total']) && $_POST['total'] !== '' ? (float) str_replace(',', '.', $_POST['total']) : null;
+        $total = OrderPricing::parseMoney($_POST['total'] ?? null);
+        if ($total === null || $total <= 0) {
+            OrderPricing::backfillMissingLinePrices($app->pdo, $id);
+            $fromLines = OrderPricing::lineTotal($app->pdo, $id);
+            if ($fromLines > 0) {
+                $total = $fromLines;
+            } elseif ($order['total'] !== null && (float) $order['total'] > 0) {
+                $total = (float) $order['total'];
+            } else {
+                $total = $fromLines;
+            }
+        }
         $app->pdo->prepare('UPDATE orders SET billing_name = ?, billing_phone = ?, billing_address = ?, billing_city = ?, billing_zip = ?, shipping_address = ?, shipping_city = ?, shipping_zip = ?, total = ? WHERE id = ?')
             ->execute([$billingName, $billingPhone, $billingAddress, $billingCity, $billingZip, $shippingAddress, $shippingCity, $shippingZip, $total, $id]);
         $message = '<div class="alert alert-success">Customer information and total updated.</div>';
@@ -382,15 +401,21 @@ if (($page ?? '') === 'order-view') {
                 $prods = $st->fetchAll();
                 $ins = $app->pdo->prepare('INSERT INTO order_line_items (order_id, lineitem_name, lineitem_price, lineitem_quantity, product_id) VALUES (?, ?, ?, 1, ?)');
                 foreach ($prods as $p) {
-                    $ins->execute([$id, $p['title'], $p['variant_price'], $p['id']]);
+                    $linePrice = $p['variant_price'] !== null && (float) $p['variant_price'] > 0
+                        ? (float) $p['variant_price']
+                        : 0;
+                    $ins->execute([$id, $p['title'], $linePrice, $p['id']]);
                 }
             }
         }
+        OrderPricing::syncOrderTotal($app->pdo, $id, false);
         header('Location: index.php?page=order-view&id=' . $id);
         exit;
     }
 
-    $lines = $app->pdo->prepare('SELECT li.*, p.image_src, p.title AS product_title FROM order_line_items li LEFT JOIN products p ON li.product_id = p.id WHERE li.order_id = ?');
+    $lines = $app->pdo->prepare('SELECT li.*, p.image_src, p.title AS product_title, p.variant_price,
+            COALESCE(NULLIF(li.lineitem_price, 0), p.variant_price, 0) AS display_price
+            FROM order_line_items li LEFT JOIN products p ON li.product_id = p.id WHERE li.order_id = ?');
     $lines->execute([$id]);
     $lines = $lines->fetchAll();
 
@@ -564,7 +589,7 @@ if (($page ?? '') === 'order-view') {
                                     <div class="product-title-modern">' . htmlspecialchars($li['product_title'] ?? $li['lineitem_name']) . '</div>
                                     <div class="product-qty-modern">Qty: ' . (int)$li['lineitem_quantity'] . '</div>
                                 </div>
-                                <div class="product-price-modern">' . number_format((float)$li['lineitem_price'], 2) . ' <span class="price-curr">' . htmlspecialchars($order['currency'] ?? 'TND') . '</span></div>
+                                <div class="product-price-modern">' . number_format((float)($li['display_price'] ?? $li['lineitem_price']), 2) . ' <span class="price-curr">' . htmlspecialchars($order['currency'] ?? 'TND') . '</span></div>
                             </div>';
                         }
                         $content .= '
@@ -870,7 +895,7 @@ if (($page ?? '') === 'order-view') {
                             if ($li['product_id']) {
                                 $hasCurrent = true;
                                 $img = $li['image_src'] ? '<img src="' . htmlspecialchars($li['image_src']) . '" alt="" class="modal-prod-img">' : '<div class="modal-prod-placeholder">P</div>';
-                                $price = $li['lineitem_price'] !== null ? (float)$li['lineitem_price'] : 0;
+                                $price = (float)($li['display_price'] ?? $li['lineitem_price'] ?? 0);
                                 $content .= '
                                 <label class="selection-item">
                                     <input type="checkbox" name="remove_line_items[]" value="' . $li['id'] . '" class="remove-checkbox" data-price="' . $price . '" onchange="calculateTotal()">
@@ -978,7 +1003,7 @@ if (($page ?? '') === 'order-view') {
     $content .= '<input type="hidden" name="shipping_address" id="hf_shipping_address" value="' . htmlspecialchars($order['shipping_address'] ?? '') . '">';
     $content .= '<input type="hidden" name="shipping_city" id="hf_shipping_city" value="' . htmlspecialchars($order['shipping_city'] ?? '') . '">';
     $content .= '<input type="hidden" name="shipping_zip" id="hf_shipping_zip" value="' . htmlspecialchars($order['shipping_zip'] ?? '') . '">';
-    $content .= '<input type="hidden" name="total" id="hf_total"></form>';
+    $content .= '<input type="hidden" name="total" id="hf_total" value="' . ($order['total'] !== null ? htmlspecialchars((string)$order['total']) : '') . '"></form>';
     
     // Snackbar for unsaved changes
     $content .= '<div id="unsaved-snackbar" class="snackbar" style="display:none;"><div class="snackbar-content"><span>You have unsaved changes</span><div class="snackbar-actions"><button onclick="saveAllChanges()" class="btn">Save</button><button onclick="discardChanges()" class="btn btn-secondary">Discard</button></div></div></div>';
@@ -986,17 +1011,17 @@ if (($page ?? '') === 'order-view') {
     // Calculate initial total from line items
     $initialTotal = 0;
     foreach ($lines as $li) {
-        if ($li['lineitem_price'] !== null) {
-            $initialTotal += (float)$li['lineitem_price'] * (int)$li['lineitem_quantity'];
-        }
+        $linePrice = (float)($li['display_price'] ?? $li['lineitem_price'] ?? 0);
+        $initialTotal += $linePrice * (int)$li['lineitem_quantity'];
     }
     
     $content .= '<script>
 var hasUnsavedChanges = false;
 var manualTotalEdit = false;
-var initialTotal = ' . ($order['total'] !== null ? (float)$order['total'] : $initialTotal) . ';
+var initialTotal = ' . ($order['total'] !== null && (float)$order['total'] > 0 ? (float)$order['total'] : $initialTotal) . ';
 var currentLineItems = ' . json_encode(array_map(function($li) {
-    return ['id' => (int)$li['id'], 'price' => $li['lineitem_price'] !== null ? (float)$li['lineitem_price'] : 0, 'qty' => (int)$li['lineitem_quantity']];
+    $price = (float)($li['display_price'] ?? $li['lineitem_price'] ?? 0);
+    return ['id' => (int)$li['id'], 'price' => $price, 'qty' => (int)$li['lineitem_quantity']];
 }, $lines)) . ';
 
 function calculateTotal() {
@@ -1034,6 +1059,17 @@ function markUnsaved() {
 
 function saveAllChanges() {
     hasUnsavedChanges = false;
+    var totalInput = document.getElementById("order-total");
+    var hiddenTotal = document.getElementById("hf_total");
+    var t = totalInput ? (totalInput.value || "").trim() : "";
+    if (t === "" || parseFloat(t) <= 0) {
+        var recovered = 0;
+        currentLineItems.forEach(function(item) { recovered += (item.price || 0) * (item.qty || 1); });
+        if (recovered > 0) t = recovered.toFixed(2);
+        else if (initialTotal > 0) t = initialTotal.toFixed(2);
+    }
+    if (hiddenTotal) hiddenTotal.value = t;
+    if (totalInput && t !== "") totalInput.value = t;
     document.getElementById("total-form").submit();
 }
 
@@ -1045,7 +1081,10 @@ function discardChanges() {
 function saveTotal() {
     manualTotalEdit = true;
     var t = document.getElementById("order-total").value;
-    document.getElementById("hf_total").value = t || "";
+    if (!t || parseFloat(t) <= 0) {
+        t = initialTotal > 0 ? initialTotal.toFixed(2) : (t || "");
+    }
+    document.getElementById("hf_total").value = t;
     markUnsaved();
 }
 
@@ -1135,6 +1174,7 @@ if ($mark > 0 && (($page ?? '') === 'orders-confirmed' || ($page ?? '') === 'ord
         // Update both new status column and legacy flags, and set confirmed_at
         if (($page ?? '') === 'orders-confirmed') {
             $app->pdo->prepare("UPDATE orders SET confirmed = 1, follow_up = 0, status = ?, confirmed_at = NOW() WHERE id = ?")->execute([$newStatus, $mark]);
+            OrderPricing::syncOrderTotal($app->pdo, $mark, true);
         } else {
             $app->pdo->prepare("UPDATE orders SET follow_up = 1, confirmed = 0, status = ?, confirmed_at = NULL, followup_at = NOW() WHERE id = ?")->execute([$newStatus, $mark]);
         }
@@ -1277,6 +1317,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bulk_action']) && $_P
             // Also update legacy flags for backward compatibility
             if ($newStatus === 'confirmed') {
                 $app->pdo->prepare("UPDATE orders SET confirmed = 1, follow_up = 0, confirmed_at = NOW() WHERE id IN ($updatePlaceholders)")->execute($validIds);
+                foreach ($validIds as $oid) {
+                    OrderPricing::syncOrderTotal($app->pdo, (int) $oid, true);
+                }
             } elseif ($newStatus === 'followup') {
                 $app->pdo->prepare("UPDATE orders SET follow_up = 1, confirmed = 0, confirmed_at = NULL, followup_at = NOW() WHERE id IN ($updatePlaceholders)")->execute($validIds);
             }
@@ -1376,6 +1419,9 @@ unset($_SESSION['import_results']);
 // Orders list (all / confirmed / follow up)
 $currentPage = $page ?? 'orders';
 $pageTitle = $currentPage === 'orders-confirmed' ? 'Confirmed orders' : ($currentPage === 'orders-followup' ? 'Follow up' : 'All orders');
+
+OrderPricing::restoreProductPricesFromOrders($app->pdo, $uid);
+OrderPricing::restoreZeroOrderTotals($app->pdo, $uid);
 
 // Get filter values
 $filterShop = (int) ($_GET['shop_id'] ?? $_POST['shop_id'] ?? 0);

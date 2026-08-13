@@ -65,9 +65,9 @@ if (($page ?? '') === 'shop-view') {
     $products->execute([$shopId]);
     $products = $products->fetchAll();
 
-    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
-    $host = $_SERVER['HTTP_HOST'];
-    $webhookUrl = $shop['webhook_token'] ? $protocol . $host . '/public/webhook-shopify.php?sid=' . $shop['id'] . '&token=' . $shop['webhook_token'] : null;
+    $webhookUrl = $shop['webhook_token']
+        ? requestBaseUrl() . '/public/webhook-shopify.php?sid=' . $shop['id'] . '&token=' . $shop['webhook_token']
+        : null;
 
     $content = '<h1>' . htmlspecialchars($shop['name']) . '</h1>';
     
