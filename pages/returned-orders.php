@@ -1,5 +1,6 @@
 <?php
 $uid = (int) $_SESSION['user_id'];
+DropforHelper::ensureSchema($app->pdo);
 $currentPage = 'returned-orders';
 $pageTitle = 'Returned Orders';
 
@@ -14,7 +15,7 @@ $offset = ($pageNum - 1) * $perPage;
 // Base condition: all returned statuses for both providers
 $returnedStatuses = ['Rtn definitif', 'Rtn client/agence', 'Retour Expediteur', 'Retour', 'Returned', 'Cancelled', 'Refusé', 'Annulé', 'REFUSE', 'ANNULE', 'RETOUR_AU_MAGASIN', 'echouée', 'annulée', 'refusée', 'retourne', 'A verifier', 'Rtn depot', 'Retour recu'];
 $placeholders = implode(',', array_fill(0, count($returnedStatuses), '?'));
-$statusCondition = "(o.fiabilo_status IN ($placeholders) OR o.intigo_status IN ($placeholders))";
+$statusCondition = "(o.fiabilo_status IN ($placeholders) OR o.intigo_status IN ($placeholders) OR o.dropfor_status IN ($placeholders))";
 
 // 1. Fetch Stats (Lifetime)
 $statsSql = "
@@ -26,7 +27,7 @@ $statsSql = "
     WHERE s.user_id = ? AND $statusCondition
 ";
 $stStats = $app->pdo->prepare($statsSql);
-$params = array_merge([$uid], $returnedStatuses, $returnedStatuses);
+$params = array_merge([$uid], $returnedStatuses, $returnedStatuses, $returnedStatuses);
 $stStats->execute($params);
 $stats = $stStats->fetch();
 
@@ -40,7 +41,8 @@ $whereParams = [$uid];
 
 if ($search !== '') {
     $searchTerm = "%$search%";
-    $whereClauses[] = "(o.name LIKE ? OR o.billing_name LIKE ? OR o.billing_phone LIKE ? OR o.fiabilo_tracking_code LIKE ? OR o.intigo_tracking_code LIKE ?)";
+    $whereClauses[] = "(o.name LIKE ? OR o.billing_name LIKE ? OR o.billing_phone LIKE ? OR o.fiabilo_tracking_code LIKE ? OR o.intigo_tracking_code LIKE ? OR o.dropfor_tracking_code LIKE ?)";
+    $whereParams[] = $searchTerm;
     $whereParams[] = $searchTerm;
     $whereParams[] = $searchTerm;
     $whereParams[] = $searchTerm;
@@ -53,7 +55,7 @@ $whereSql = implode(' AND ', $whereClauses);
 // Count for pagination
 $countSql = "SELECT COUNT(*) FROM orders o JOIN shops s ON o.shop_id = s.id WHERE $whereSql";
 $stCount = $app->pdo->prepare($countSql);
-$allParams = array_merge($whereParams, $returnedStatuses, $returnedStatuses);
+$allParams = array_merge($whereParams, $returnedStatuses, $returnedStatuses, $returnedStatuses);
 $stCount->execute($allParams);
 $totalFilteredCount = (int)$stCount->fetchColumn();
 $totalPages = max(1, (int)ceil($totalFilteredCount / $perPage));
@@ -68,7 +70,7 @@ $sql = "
     LIMIT $perPage OFFSET $offset
 ";
 $st = $app->pdo->prepare($sql);
-$allParams = array_merge($whereParams, $returnedStatuses, $returnedStatuses);
+$allParams = array_merge($whereParams, $returnedStatuses, $returnedStatuses, $returnedStatuses);
 $st->execute($allParams);
 $orders = $st->fetchAll();
 
@@ -158,10 +160,12 @@ if (empty($orders)) {
             <td>
                 ' . (!empty($o['fiabilo_tracking_code']) ? '<div style="margin-bottom:4px;"><small style="color:#94a3b8; font-size:0.65rem;">FIABILO:</small> <code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:0.875rem; color:#475569;">' . htmlspecialchars($o['fiabilo_tracking_code']) . '</code></div>' : '') . '
                 ' . (!empty($o['intigo_tracking_code']) ? '<div><small style="color:#94a3b8; font-size:0.65rem;">INTIGO:</small> <code style="background:#e0f2fe; padding:2px 6px; border-radius:4px; font-size:0.875rem; color:#0369a1;">' . htmlspecialchars($o['intigo_tracking_code']) . '</code></div>' : '') . '
+                ' . (!empty($o['dropfor_tracking_code']) ? '<div><small style="color:#94a3b8; font-size:0.65rem;">DROPFOR:</small> <code style="background:#dbeafe; padding:2px 6px; border-radius:4px; font-size:0.875rem; color:#1d4ed8;">' . htmlspecialchars($o['dropfor_tracking_code']) . '</code></div>' : '') . '
             </td>
             <td>
                 ' . (!empty($o['fiabilo_status']) ? '<span class="status-pill danger" style="padding:4px 10px; border-radius:20px; font-weight:700; font-size:0.75rem; margin-right:4px;">' . htmlspecialchars($o['fiabilo_status']) . '</span>' : '') . '
                 ' . (!empty($o['intigo_status']) ? '<span class="status-pill warning" style="padding:4px 10px; border-radius:20px; font-weight:700; font-size:0.75rem; background:#fff7ed; color:#c2410c; border:1px solid #ffedd5;">' . htmlspecialchars($o['intigo_status']) . '</span>' : '') . '
+                ' . (!empty($o['dropfor_status']) ? '<span class="status-pill" style="padding:4px 10px; border-radius:20px; font-weight:700; font-size:0.75rem; background:#dbeafe; color:#1d4ed8; border:1px solid #bfdbfe;">' . htmlspecialchars($o['dropfor_status']) . '</span>' : '') . '
             </td>
             <td style="font-weight:700;">' . number_format((float)$o['total'], 2) . ' ' . htmlspecialchars($o['currency'] ?? 'TND') . '</td>
             <td>

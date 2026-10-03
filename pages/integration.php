@@ -21,6 +21,10 @@ $intigoRow = $stIntigo->fetch();
 $hasIntigo = $intigoRow && !empty($intigoRow['add_token_encrypted']) && !empty($intigoRow['tracking_token_encrypted']);
 $isIntigoSandbox = ($intigoRow['api_mode'] ?? 'prod') === 'sandbox';
 
+DropforHelper::ensureSchema($app->pdo);
+$hasDropfor = DropforHelper::resolveToken($app->pdo, $uid, $app->app['encryption_key'] ?? '') !== '';
+$dropforLogo = htmlspecialchars(($appPublicPrefix ?? '/public') . '/assets/dropfor.png');
+
 $encryptionKey = $app->app['encryption_key'] ?? '';
 
 // Ensure env tracking token is stored so sync always has the etat API key
@@ -30,6 +34,11 @@ if ($envTrack !== '' && (empty($fiabiloRow['tracking_token_encrypted']) || Fiabi
     $stFiabilo->execute([$uid, 'fiabilo']);
     $fiabiloRow = $stFiabilo->fetch();
 }
+
+CashflowHelper::ensureSchema($app->pdo);
+$financeSettings = CashflowHelper::getSettings($app->pdo, $uid);
+$hasMetaAds = FacebookAdsHelper::hasCredentials($app->pdo, $uid, $encryptionKey);
+$metaTestMsg = '';
 
 // Auto-generate token for shops that don't have one
 foreach ($allShops as &$s) {
@@ -84,6 +93,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['delete_intigo'])) {
         $app->pdo->prepare('DELETE FROM user_integrations WHERE user_id = ? AND provider = ?')->execute([$uid, 'intigo']);
         $hasIntigo = false;
+    }
+    elseif (isset($_POST['save_dropfor'])) {
+        $addToken = trim($_POST['add_token'] ?? '');
+        if ($addToken !== '') {
+            try {
+                DropforHelper::saveToken($app->pdo, $uid, $addToken, $encryptionKey);
+                $hasDropfor = true;
+            } catch (Throwable $e) {}
+        }
+    } elseif (isset($_POST['delete_dropfor'])) {
+        $app->pdo->prepare('DELETE FROM user_integrations WHERE user_id = ? AND provider = ?')->execute([$uid, 'dropfor']);
+        $hasDropfor = false;
+    } elseif (isset($_POST['test_dropfor'])) {
+        $apiKey = trim($_POST['add_token'] ?? '');
+        if ($apiKey === '' && $hasDropfor) {
+            $apiKey = DropforHelper::resolveToken($app->pdo, $uid, $encryptionKey);
+        }
+        if ($apiKey === '') {
+            $testDropforMsg = '<div style="background:#fef3c7; padding:0.75rem; border-radius:8px; text-align:center; color:#92400e; font-weight:600; font-size:0.9rem; margin-bottom:1rem;">! Enter API key first</div>';
+        } else {
+            $testRes = DropforHelper::testConnection($apiKey);
+            $testDropforMsg = $testRes['success']
+                ? '<div style="background:#d1fae7; padding:0.75rem; border-radius:8px; text-align:center; color:#065f46; font-weight:600; font-size:0.9rem; margin-bottom:1rem;">✓ Connection Successful</div>'
+                : '<div style="background:#fee2e2; padding:0.75rem; border-radius:8px; text-align:center; color:#991b1b; font-weight:600; font-size:0.9rem; margin-bottom:1rem;">✗ ' . htmlspecialchars($testRes['error'] ?? 'Connection failed') . '</div>';
+        }
+    }
+    // Meta Ads
+    elseif (isset($_POST['save_meta_ads'])) {
+        $token = trim($_POST['meta_access_token'] ?? '');
+        $accountId = trim($_POST['meta_ad_account_id'] ?? '');
+        if ($token === '' && $hasMetaAds) {
+            $token = FacebookAdsHelper::resolveToken($app->pdo, $uid, $encryptionKey);
+        }
+        if ($accountId === '' && $hasMetaAds) {
+            $accountId = FacebookAdsHelper::resolveAdAccountId($app->pdo, $uid, $encryptionKey);
+        }
+        if ($token !== '' && $accountId !== '') {
+            FacebookAdsHelper::saveCredentials($app->pdo, $uid, $token, $accountId, $encryptionKey);
+            $hasMetaAds = true;
+            $financeSettings = CashflowHelper::getSettings($app->pdo, $uid);
+        }
+    } elseif (isset($_POST['delete_meta_ads'])) {
+        FacebookAdsHelper::deleteCredentials($app->pdo, $uid);
+        $hasMetaAds = false;
+    } elseif (isset($_POST['test_meta_ads'])) {
+        $token = trim($_POST['meta_access_token'] ?? '');
+        $accountId = trim($_POST['meta_ad_account_id'] ?? '');
+        if ($token === '') {
+            $token = FacebookAdsHelper::resolveToken($app->pdo, $uid, $encryptionKey);
+        }
+        if ($accountId === '') {
+            $accountId = FacebookAdsHelper::resolveAdAccountId($app->pdo, $uid, $encryptionKey);
+        }
+        $test = FacebookAdsHelper::testConnection($token, $accountId);
+        if (isset($test['ok'])) {
+            $metaTestMsg = '<div style="background:#d1fae7; padding:0.75rem; border-radius:8px; text-align:center; color:#065f46; font-weight:600; font-size:0.9rem; margin-bottom:1rem;">✓ ' . htmlspecialchars($test['name'] ?? 'Connected') . ' (' . htmlspecialchars($test['currency'] ?? '') . ')</div>';
+        } else {
+            $metaTestMsg = '<div style="background:#fee2e2; padding:0.75rem; border-radius:8px; text-align:center; color:#991b1b; font-weight:600; font-size:0.9rem; margin-bottom:1rem;">✗ ' . htmlspecialchars($test['error'] ?? 'Failed') . '</div>';
+        }
     }
     // Test Intigo
     elseif (isset($_POST['test_intigo'])) {
@@ -543,6 +611,9 @@ $content = '
   grid-template-columns: repeat(2, 1fr);
   gap: 1rem;
 }
+#ship-modal .wf-modal-box { max-width: 640px; }
+#ship-modal .prov-grid { grid-template-columns: repeat(3, 1fr); }
+.prov-item img.brand-logo { width: 100%; max-width: 120px; height: 36px; object-fit: contain; border-radius: 0; }
 
 .prov-item {
   background: #fff;
@@ -624,17 +695,38 @@ $content = '
       <div class="stat-sub">Active provider</div>
     </div>
   </div>
+
+  <div class="stat-card" style="margin:0 0 1.5rem; padding:1.25rem; border:1px solid #dbeafe; background:linear-gradient(135deg,#eff6ff,#ffffff); border-radius:16px;">
+    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; gap:1rem; align-items:center;">
+      <div>
+        <div class="stat-label" style="color:#1d4ed8;">Meta Ads (Facebook)</div>
+        <div class="stat-value" style="font-size:1.35rem;">' . ($hasMetaAds ? 'Connected' : 'Not connected') . '</div>
+        <div class="stat-sub">' . ($hasMetaAds
+            ? ('Account act_' . htmlspecialchars($financeSettings['meta_ad_account_id'] ?: '—') . ' · feeds Cash Flow Hub')
+            : 'Connect access token + ad account to sync spend, CPM, CTR, CPC') . '</div>
+      </div>
+      <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button type="button" class="btn" onclick="openWfModal(\'meta-ads-modal\')">' . ($hasMetaAds ? 'Manage Meta Ads' : 'Connect Meta Ads') . '</button>
+        <a class="btn btn-secondary" href="index.php?page=cashflow">Open Cash Flow</a>
+      </div>
+    </div>
+  </div>
 ';
 
 // Helper to render one workflow
-function renderWorkflowCard($shop, $hasFiabilo, $hasIntigo, $isHidden = false) {
-    global $allShops;
+function renderWorkflowCard($shop, $hasFiabilo, $hasIntigo, $hasDropfor = false, $isHidden = false) {
+    global $allShops, $dropforLogo;
     $isNew = ($shop === null);
     $shopId = $isNew ? 0 : $shop['id'];
     $shopName = $isNew ? '' : $shop['name'];
     $hasShopify = !$isNew && !empty($shop['webhook_token']);
     
-    $hasAnyShipping = $hasFiabilo || $hasIntigo;
+    $hasAnyShipping = $hasFiabilo || $hasIntigo || $hasDropfor;
+    $shipNames = [];
+    if ($hasFiabilo) $shipNames[] = 'FIABILO';
+    if ($hasIntigo) $shipNames[] = 'INTIGO';
+    if ($hasDropfor) $shipNames[] = 'DROPFOR';
+    $shipLabel = $shipNames ? implode(' · ', $shipNames) : 'Not Set';
     
     // Determine status badge
     $statusClass = ($hasShopify && $hasAnyShipping) ? 'active' : 'incomplete';
@@ -740,14 +832,14 @@ function renderWorkflowCard($shop, $hasFiabilo, $hasIntigo, $isHidden = false) {
           <div class="integration-pill ' . ($hasAnyShipping ? 'pill-green' : 'pill-empty') . '">Shipping Company</div>
           <div class="connector-dashed" style="flex:0 0 40px;"><div class="line-dashed"></div><div class="arrow-head"></div></div>
           <div class="node-platform ' . (!$hasAnyShipping ? 'empty' : '') . '" ' . ($hasAnyShipping ? 'onclick="openShipModal(' . $shopId . ')"' : 'onclick="openShipModal(' . $shopId . ')"') . '>
-            ' . ($hasFiabilo ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>' : ($hasIntigo ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>')) . '
+            ' . ($hasDropfor && !$hasFiabilo && !$hasIntigo ? '<img src="' . $dropforLogo . '" alt="Dropfor" style="width:28px;height:28px;object-fit:contain;">' : ($hasFiabilo ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>' : ($hasIntigo ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'))) . '
           </div>
           <div class="connector-dashed" style="flex:0 0 40px;"><div class="line-dashed"></div><div class="arrow-head"></div></div>
           <div class="node-status-circle ' . ($hasAnyShipping ? 'status-ok' : 'status-warn') . '">
             ' . ($hasAnyShipping ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : '!') . '
           </div>
           <div class="integration-info">
-            <span class="int-title">' . ($hasFiabilo ? 'FIABILO' : ($hasIntigo ? 'INTIGO' : 'Not Set')) . '</span>
+            <span class="int-title">' . htmlspecialchars($shipLabel) . '</span>
             <span class="int-desc ' . ($hasAnyShipping ? 'active' : 'action') . '">' . ($hasAnyShipping ? 'Connected' : 'Action required') . '</span>
           </div>
         </div>
@@ -761,17 +853,17 @@ function renderWorkflowCard($shop, $hasFiabilo, $hasIntigo, $isHidden = false) {
 if (!empty($allShops)) {
     $delay = 0;
     foreach ($allShops as $s) {
-        $content .= '<div style="animation-delay: ' . $delay . 's">' . renderWorkflowCard($s, $hasFiabilo, $hasIntigo, false) . '</div>';
+        $content .= '<div style="animation-delay: ' . $delay . 's">' . renderWorkflowCard($s, $hasFiabilo, $hasIntigo, $hasDropfor, false) . '</div>';
         $delay += 0.1;
     }
 } else {
     // If no shops at all, render one visible new template
-    $content .= renderWorkflowCard(null, $hasFiabilo, $hasIntigo, false);
+    $content .= renderWorkflowCard(null, $hasFiabilo, $hasIntigo, $hasDropfor, false);
 }
 
 // Render hidden template for new shops (if we already have some)
 if (!empty($allShops)) {
-    $content .= renderWorkflowCard(null, $hasFiabilo, $hasIntigo, true);
+    $content .= renderWorkflowCard(null, $hasFiabilo, $hasIntigo, $hasDropfor, true);
 }
 
 $content .= '
@@ -834,11 +926,15 @@ $content .= '
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
           <span>INTIGO</span>
         </div>
+        <div class="prov-item ' . ($hasDropfor ? 'selected' : '') . '" onclick="selectShip(\'dropfor\', this)">
+          <img class="brand-logo" src="' . $dropforLogo . '" alt="Dropfor">
+          <span>DROPFOR</span>
+        </div>
       </div>
     </div>
     <div class="wf-modal-foot">
       <button type="button" class="btn btn-secondary" onclick="closeWfModal(\'ship-modal\')">Cancel</button>
-      <button type="button" class="btn" id="ship-continue" onclick="continueShip()" ' . ($hasFiabilo || $hasIntigo ? '' : 'disabled') . '>Continue</button>
+      <button type="button" class="btn" id="ship-continue" onclick="continueShip()" ' . ($hasFiabilo || $hasIntigo || $hasDropfor ? '' : 'disabled') . '>Continue</button>
     </div>
   </div>
 </div>
@@ -910,6 +1006,62 @@ $content .= '
   </div>
 </div>
 
+<div class="wf-modal" id="dropfor-modal">
+  <div class="wf-modal-box">
+    <div class="wf-modal-head">
+      <h3>DROPFOR API</h3>
+      <button class="wf-modal-close" onclick="closeWfModal(\'dropfor-modal\')">&times;</button>
+    </div>
+    <form method="post">
+      <div class="wf-modal-body">
+        <p style="color:#64748b;font-size:0.9rem;line-height:1.5;margin:0 0 1rem;">Paste the bearer token from your Dropfor account (API page). It is sent as <code>Authorization: Bearer</code>.</p>
+        ' . ($testDropforMsg ?? '') . '
+        <div class="form-group">
+          <label class="form-label">API Key</label>
+          <input type="password" name="add_token" class="form-input" placeholder="' . ($hasDropfor ? 'Leave blank to keep current' : 'df_live_...') . '">
+        </div>
+        ' . ($hasDropfor ? '<div style="background:#dbeafe; padding:0.75rem; border-radius:8px; text-align:center; color:#1e3a8a; font-weight:600; font-size:0.9rem; margin-top:1rem;">✓ Connected</div>' : '') . '
+      </div>
+      <div class="wf-modal-foot">
+        <button type="button" class="btn btn-secondary" onclick="closeWfModal(\'dropfor-modal\')">Cancel</button>
+        ' . ($hasDropfor ? '<button type="submit" name="delete_dropfor" value="1" class="btn" style="background:#fecaca; color:#b91c1c; border:1px solid #fca5a5" onclick="return confirm(\'Disconnect DROPFOR?\')">Disconnect</button>' : '') . '
+        <button type="submit" name="test_dropfor" value="1" class="btn btn-secondary">Test Connection</button>
+        <button type="submit" name="save_dropfor" value="1" class="btn">' . ($hasDropfor ? 'Update' : 'Connect') . '</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="wf-modal" id="meta-ads-modal">
+  <div class="wf-modal-box">
+    <div class="wf-modal-head">
+      <h3>Meta Ads (Facebook)</h3>
+      <button class="wf-modal-close" onclick="closeWfModal(\'meta-ads-modal\')">&times;</button>
+    </div>
+    <form method="post">
+      <div class="wf-modal-body">
+        <p style="color:#64748b;font-size:0.9rem;line-height:1.5;margin:0 0 1rem;">Use a long-lived user or system user token with <code>ads_read</code>. Ad Account ID looks like <code>1234567890</code> or <code>act_1234567890</code>.</p>
+        ' . $metaTestMsg . '
+        <div class="form-group">
+          <label class="form-label">Access Token</label>
+          <input type="password" name="meta_access_token" class="form-input" placeholder="' . ($hasMetaAds ? 'Leave blank to keep current' : 'EAAB...') . '">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Ad Account ID</label>
+          <input type="text" name="meta_ad_account_id" class="form-input" placeholder="act_XXXXXXXX" value="' . htmlspecialchars($financeSettings['meta_ad_account_id'] ?? '') . '">
+        </div>
+        ' . ($hasMetaAds ? '<div style="background:#d1fae5; padding:0.75rem; border-radius:8px; text-align:center; color:#065f46; font-weight:600; font-size:0.9rem; margin-top:1rem;">✓ Connected — sync from Cash Flow Hub</div>' : '') . '
+      </div>
+      <div class="wf-modal-foot">
+        <button type="button" class="btn btn-secondary" onclick="closeWfModal(\'meta-ads-modal\')">Cancel</button>
+        ' . ($hasMetaAds ? '<button type="submit" name="delete_meta_ads" value="1" class="btn" style="background:#fecaca; color:#b91c1c; border:1px solid #fca5a5" onclick="return confirm(\'Disconnect Meta Ads?\')">Disconnect</button>' : '') . '
+        <button type="submit" name="test_meta_ads" value="1" class="btn btn-secondary">Test</button>
+        <button type="submit" name="save_meta_ads" value="1" class="btn">' . ($hasMetaAds ? 'Update' : 'Connect') . '</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- COMING SOON MODAL -->
 <div class="wf-modal" id="coming-soon-modal">
   <div class="wf-modal-box">
@@ -931,7 +1083,7 @@ $content .= '
 
 <script>
 let currentShopId = 0;
-let selectedShipProvider = "' . ($hasFiabilo ? 'fiabilo' : ($hasIntigo ? 'intigo' : '')) . '";
+let selectedShipProvider = "' . ($hasFiabilo ? 'fiabilo' : ($hasIntigo ? 'intigo' : ($hasDropfor ? 'dropfor' : ''))) . '";
 
 function openWfModal(id) { document.getElementById(id).classList.add("open"); }
 function closeWfModal(id) { document.getElementById(id).classList.remove("open"); }
@@ -1003,6 +1155,7 @@ function continueShip() {
   closeWfModal("ship-modal");
   if(selectedShipProvider === "fiabilo") openWfModal("fiabilo-modal");
   else if(selectedShipProvider === "intigo") openWfModal("intigo-modal");
+  else if(selectedShipProvider === "dropfor") openWfModal("dropfor-modal");
 }
 
 document.querySelectorAll(".wf-modal").forEach(m => {
@@ -1010,6 +1163,7 @@ document.querySelectorAll(".wf-modal").forEach(m => {
 });
 
 ' . (isset($testResultMsg) ? 'openWfModal("intigo-modal");' : '') . '
+' . (isset($testDropforMsg) ? 'openWfModal("dropfor-modal");' : '') . '
 </script>
 ';
 

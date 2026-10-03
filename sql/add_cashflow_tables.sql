@@ -1,0 +1,39 @@
+-- Cash Flow Hub tables (also auto-created by CashflowHelper::ensureSchema)
+CREATE TABLE IF NOT EXISTS finance_settings (
+  user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+  courier_fee_delivered DECIMAL(10,2) NOT NULL DEFAULT 8.00,
+  courier_fee_return DECIMAL(10,2) NOT NULL DEFAULT 8.00,
+  handling_fee_pct DECIMAL(5,2) NOT NULL DEFAULT 3.00,
+  currency VARCHAR(8) NOT NULL DEFAULT 'TND',
+  meta_ad_account_id VARCHAR(64) DEFAULT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS finance_entries (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  entry_date DATE NOT NULL,
+  entry_type VARCHAR(32) NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  label VARCHAR(255) DEFAULT NULL,
+  notes TEXT DEFAULT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_finance_user_date (user_id, entry_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS ad_insights_daily (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  insight_date DATE NOT NULL,
+  spend DECIMAL(12,2) NOT NULL DEFAULT 0,
+  impressions INT UNSIGNED NOT NULL DEFAULT 0,
+  clicks INT UNSIGNED NOT NULL DEFAULT 0,
+  reach INT UNSIGNED NOT NULL DEFAULT 0,
+  cpc DECIMAL(12,4) DEFAULT NULL,
+  cpm DECIMAL(12,4) DEFAULT NULL,
+  ctr DECIMAL(12,4) DEFAULT NULL,
+  fb_purchases INT UNSIGNED NOT NULL DEFAULT 0,
+  fb_purchase_value DECIMAL(12,2) NOT NULL DEFAULT 0,
+  synced_at DATETIME DEFAULT NULL,
+  UNIQUE KEY uniq_user_day (user_id, insight_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

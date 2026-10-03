@@ -16,7 +16,7 @@ $order = $st->fetch();
 $trackingHistory = [];
 $livreur = $order['livreur'] ?? null;
 $livreurTel = $order['livreur_tel'] ?? null;
-$liveStatus = $order['intigo_status'] ?: ($order['fiabilo_status'] ?: 'En attente');
+$liveStatus = $order['dropfor_status'] ?: ($order['intigo_status'] ?: ($order['fiabilo_status'] ?: 'En attente'));
 
 // Default progress state
 $progressStep = 1;
@@ -70,10 +70,34 @@ if (!empty($order['intigo_tracking_code'])) {
     }
 }
 
-$trackingCode = !empty($order['intigo_tracking_code']) ? $order['intigo_tracking_code'] : ($order['fiabilo_tracking_code'] ?? '');
+if (!empty($order['dropfor_tracking_code'])) {
+    $token = DropforHelper::resolveToken($app->pdo, $uid, $app->app['encryption_key'] ?? '');
+    if ($token !== '') {
+        $statusRes = DropforHelper::getStatus($order['dropfor_tracking_code'], $token);
+        if (isset($statusRes['status'])) {
+            $liveStatus = $statusRes['status'];
+            DropforHelper::applyStatusUpdate($app->pdo, $orderId, $liveStatus, $order['dropfor_status'] ?? null, $statusRes['payment'] ?? '');
+            $order['dropfor_status'] = $liveStatus;
+            $trackingHistory = [['etat' => $liveStatus, 'date' => date('Y-m-d H:i:s')]];
+            $lower = mb_strtolower($liveStatus);
+            if (str_contains($lower, 'livr')) {
+                $progressStep = 4;
+            } elseif (str_contains($lower, 'cours')) {
+                $progressStep = 3;
+            } elseif (str_contains($lower, 'depot') || str_contains($lower, 'dépôt')) {
+                $progressStep = 2;
+            } elseif (str_contains($lower, 'retour')) {
+                $isRefused = true;
+                $progressStep = 3;
+            }
+        }
+    }
+}
+
+$trackingCode = !empty($order['dropfor_tracking_code']) ? $order['dropfor_tracking_code'] : (!empty($order['intigo_tracking_code']) ? $order['intigo_tracking_code'] : ($order['fiabilo_tracking_code'] ?? ''));
 
 // Map shipping statuses to 4-step progress (FALLBACK for Fiabilo or when not overridden by Intigo logic above)
-if (empty($order['intigo_tracking_code'])) {
+if (empty($order['intigo_tracking_code']) && empty($order['dropfor_tracking_code'])) {
     $status = $liveStatus;
     $statusLower = mb_strtolower($status);
     $deliveredStatuses = ['livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree'];

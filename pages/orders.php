@@ -1,5 +1,6 @@
 <?php
 $uid = (int) $_SESSION['user_id'];
+DropforHelper::ensureSchema($app->pdo);
 
 // Dropilo Export Handler
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['dropilo_export'])) {
@@ -537,13 +538,24 @@ if (($page ?? '') === 'order-view') {
                 }
             }
         }
+    } elseif (!empty($order['dropfor_tracking_code'])) {
+        $token = DropforHelper::resolveToken($app->pdo, $uid, $app->app['encryption_key'] ?? '');
+        if ($token !== '') {
+            $statusRes = DropforHelper::getStatus($order['dropfor_tracking_code'], $token);
+            if (isset($statusRes['status'])) {
+                DropforHelper::applyStatusUpdate($app->pdo, $id, $statusRes['status'], $order['dropfor_status'] ?? null, $statusRes['payment'] ?? '');
+                $order['dropfor_status'] = $statusRes['status'];
+                $order['dropfor_payment'] = $statusRes['payment'] ?? ($order['dropfor_payment'] ?? '');
+                $trackingHistory = [['etat' => $statusRes['status'], 'date' => date('Y-m-d H:i:s')]];
+            }
+        }
     }
 
     $currentPage = 'orders';
     $pageTitle = 'Order ' . htmlspecialchars($order['name']);
     
     // Read-only logic: If order has tracking code, it's with shipping and shouldn't be modified
-    $isReadOnly = !empty($order['fiabilo_tracking_code']) || !empty($order['intigo_tracking_code']);
+    $isReadOnly = !empty($order['fiabilo_tracking_code']) || !empty($order['intigo_tracking_code']) || !empty($order['dropfor_tracking_code']);
 
     $checkIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
     $statusId = strtolower(str_replace(' ', '-', $order['status'] ?? 'new'));
@@ -704,6 +716,13 @@ if (($page ?? '') === 'order-view') {
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
                                 <span>' . htmlspecialchars($order['intigo_tracking_code']) . '</span>
                             </div>' : '') . '
+                            ' . (!empty($order['dropfor_tracking_code']) ? '
+                            <div class="tracking-link-modern" style="color: #2563eb;">
+                                <span style="font-size:0.7rem; color:#64748b; margin-right:4px;">DROPFOR:</span>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                                <span>' . htmlspecialchars($order['dropfor_tracking_code']) . '</span>
+                                ' . (!empty($order['dropfor_status']) ? '<span style="margin-left:6px; font-size:0.75rem;">' . htmlspecialchars($order['dropfor_status']) . '</span>' : '') . '
+                            </div>' : '') . '
                         </div>
                         <div class="actions-stack-modern">
                             ' . (!$isReadOnly ? '
@@ -719,6 +738,11 @@ if (($page ?? '') === 'order-view') {
                                     <input type="hidden" name="order_ids[]" value="' . $id . '">
                                     <input type="hidden" name="shipping" value="intigo">
                                     <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #0ea5e9; color: white; border: none;">INTIGO Shipment</button>
+                                </form>
+                                <form method="post" style="margin-top: 0.5rem;">
+                                    <input type="hidden" name="order_ids[]" value="' . $id . '">
+                                    <input type="hidden" name="shipping" value="dropfor">
+                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #2563eb; color: white; border: none;">DROPFOR Shipment</button>
                                 </form>
                             </div>' : '') . '
                             ' : '<div class="read-only-notice"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg> Order is being shipped. Interaction disabled.</div>') . '
@@ -1461,6 +1485,44 @@ if ($triggerBulkShipping && $_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+    elseif ($shippingProvider === 'dropfor' && !empty($orderIds)) {
+        $token = DropforHelper::resolveToken($app->pdo, $uid, $app->app['encryption_key'] ?? '');
+        if ($token === '') {
+            $sendMessage = '<div class="alert alert-error">Connect DROPFOR in Integration first.</div>';
+        } else {
+            $ok = 0;
+            $errs = [];
+            foreach ($orderIds as $oid) {
+                $st = $app->pdo->prepare('SELECT o.* FROM orders o JOIN shops s ON o.shop_id = s.id WHERE o.id = ? AND s.user_id = ?');
+                $st->execute([$oid, $uid]);
+                $order = $st->fetch();
+                if (!$order || !empty($order['dropfor_tracking_code'])) {
+                    if (!empty($order['dropfor_tracking_code'])) $errs[] = $order['name'] . ' already sent to Dropfor';
+                    continue;
+                }
+                $lines = $app->pdo->query("SELECT lineitem_name, lineitem_quantity FROM order_line_items WHERE order_id = " . (int)$oid)->fetchAll();
+                $designation = [];
+                $nb_article = 0;
+                foreach ($lines as $l) {
+                    $q = (int) $l['lineitem_quantity'];
+                    $nb_article += $q;
+                    $designation[] = trim($l['lineitem_name']) . ' (x' . $q . ')';
+                }
+                $order['designation'] = implode(', ', $designation) ?: 'Order';
+                $order['nb_article'] = $nb_article ?: 1;
+                $result = DropforHelper::addOrder($order, $token);
+                if (!empty($result['id'])) {
+                    $app->pdo->prepare('UPDATE orders SET dropfor_tracking_code = ?, dropfor_status = ?, dropfor_payment = ?, status = ?, dropfor_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['id'], $result['status'] ?? 'En attente', $result['payment'] ?? '', 'shipping', $oid]);
+                    $ok++;
+                } else {
+                    $errs[] = ($order['name'] ?? ('#' . $oid)) . ': ' . ($result['error'] ?? 'Failed');
+                }
+            }
+            $sendMessage = $ok > 0 ? '<div class="alert alert-success">Assigned ' . $ok . ' order(s) to DROPFOR.</div>' : '';
+            if (!empty($errs)) $sendMessage .= '<div class="alert alert-error">' . implode('<br>', array_map('htmlspecialchars', $errs)) . '</div>';
+        }
+    }
 }
 
 // Handle bulk status updates
@@ -2072,8 +2134,8 @@ $content .= '<input type="hidden" name="page" value="' . htmlspecialchars($curre
 // Shipping toolbar for confirmed orders page
 if ($currentPage === 'orders-confirmed') {
     $content .= '<div class="orders-toolbar">
-      <div class="orders-toolbar-left"><h3 class="orders-toolbar-title">Send to shipping company</h3><p class="orders-toolbar-subtitle">Select orders below, choose FIABILO, then press Send order.</p></div>
-      <div class="orders-toolbar-actions"><select name="shipping" class="select" aria-label="Shipping company"><option value="fiabilo">FIABILO</option><option value="intigo">INTIGO</option></select> <button type="submit" name="send_to_shipping" value="1" class="btn btn-warning">Send order(s)</button></div>
+      <div class="orders-toolbar-left"><h3 class="orders-toolbar-title">Send to shipping company</h3><p class="orders-toolbar-subtitle">Select orders below, choose FIABILO, INTIGO, or DROPFOR, then press Send order.</p></div>
+      <div class="orders-toolbar-actions"><select name="shipping" class="select" aria-label="Shipping company"><option value="fiabilo">FIABILO</option><option value="intigo">INTIGO</option><option value="dropfor">DROPFOR</option></select> <button type="submit" name="send_to_shipping" value="1" class="btn btn-warning">Send order(s)</button></div>
     </div>';
 }
 

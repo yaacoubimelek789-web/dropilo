@@ -1,5 +1,6 @@
 <?php
 $uid = (int) $_SESSION['user_id'];
+DropforHelper::ensureSchema($app->pdo);
 $currentPage = 'delivered-orders';
 $pageTitle = 'Delivered Orders';
 
@@ -78,8 +79,8 @@ $deliveredList = ['livré', 'livrés', 'livrer', 'delivered', 'reçu', 'livree']
 $placeholders = implode(',', array_fill(0, count($deliveredList), '?'));
 
 // Build filter clause
-$filterSql = " AND LOWER(o.fiabilo_status) IN ($placeholders)";
-$params = array_merge([$uid], $deliveredList);
+$filterSql = " AND (LOWER(o.fiabilo_status) IN ($placeholders) OR LOWER(o.dropfor_status) IN ($placeholders))";
+$params = array_merge([$uid], $deliveredList, $deliveredList);
 
 if ($startDate && $endDate) {
     $filterSql .= " AND DATE(o.delivered_at) >= ? AND DATE(o.delivered_at) <= ?";
@@ -122,12 +123,12 @@ $totalProductCost = (float)($stCost->fetchColumn() ?? 0);
 // 1.2 Calculate Accepted Count for Delivery Rate (Respecting Search)
 $returnedList = ['Retourné', 'Annulé', 'Retour', 'Refusé', 'Returned', 'Cancelled'];
 $shippingList = ['En cours', 'En cours de livraison', 'Expédié', 'Shipping', 'Shipped'];
-$warehouseList = ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé'];
+$warehouseList = ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé', 'Au dépôt', 'Pickup demandé'];
 $allAccepted = array_merge($deliveredList, $returnedList, $shippingList, $warehouseList);
 $placeholdersAcc = implode(',', array_fill(0, count($allAccepted), '?'));
 
-$paramsAcc = array_merge([$uid], $allAccepted);
-$filterSqlAcc = " AND o.fiabilo_status IN ($placeholdersAcc)";
+$paramsAcc = array_merge([$uid], $allAccepted, $allAccepted);
+$filterSqlAcc = " AND (o.fiabilo_status IN ($placeholdersAcc) OR o.dropfor_status IN ($placeholdersAcc))";
 if ($search !== '') {
     $filterSqlAcc .= " AND o.billing_name LIKE ?";
     $paramsAcc[] = '%' . $search . '%';

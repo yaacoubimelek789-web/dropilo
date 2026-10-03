@@ -19,11 +19,14 @@ require_once $base . '/src/OrderImport.php';
 require_once $base . '/src/OrderProductMatch.php';
 require_once $base . '/src/FiabiloHelper.php';
 require_once $base . '/src/IntigoHelper.php';
+require_once $base . '/src/DropforHelper.php';
 require_once $base . '/src/GeminiHelper.php';
 require_once $base . '/src/UserDataContext.php';
 require_once $base . '/src/DropiloExport.php';
 require_once $base . '/src/DropiloImport.php';
 require_once $base . '/src/OrderPricing.php';
+require_once $base . '/src/CashflowHelper.php';
+require_once $base . '/src/FacebookAdsHelper.php';
 
 $cfg = require $base . '/config/database.php';
 $appConfig = require $base . '/config/app.php';

@@ -1,5 +1,6 @@
 <?php
 $uid = (int) $_SESSION['user_id'];
+DropforHelper::ensureSchema($app->pdo);
 $statusKey = $_GET['status'] ?? 'shipping';
 $search = trim($_GET['search'] ?? '');
 $pageTitle = 'Shipping Details';
@@ -7,11 +8,11 @@ $currentPage = 'dashboard'; // Keep dashboard highlighted in sidebar
 
 // Map friendly status to shipping status strings (Common for both)
 $statusMap = [
-    'pending'   => ['En attente', 'Assigné au livreur', 'Assigné', 'Enlèvement', 'Enlevement', 'Enlever', 'Enlevé', 'Enleve', null, ''],
+    'pending'   => ['En attente', 'Assigné au livreur', 'Assigné', 'Enlèvement', 'Enlevement', 'Enlever', 'Enlevé', 'Enleve', 'Pickup demandé', 'À vérifier', 'À relance', null, ''],
     'shipping'  => ['En cours', 'En cours de livraison', 'Expédié', 'Shipping', 'Shipped', 'En livraison'],
     'delivered' => ['Livré', 'Livrés', 'Livrer', 'Delivered', 'Reçu', 'livree', 'Livree'],
     'returned'  => ['Retourné', 'Annulé', 'Retour', 'Refusé', 'Returned', 'Cancelled', 'REFUSE', 'ANNULE', 'RETOUR_AU_MAGASIN', 'echouée', 'annulée', 'refusée', 'retourne', 'Annulé par admin', 'En retour définitif', 'En retour vendeur', 'Colis perdu', 'Relance', 'A verifier', 'Rtn depot', 'Rtn definitif', 'Rtn client/agence', 'Retour Expediteur', 'Retour recu', 'Supprime'],
-    'warehouse' => ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé', 'En transfert vers centre', 'Entré au centre', 'En transfert', 'Vérification', 'En retour provisoire'],
+    'warehouse' => ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé', 'Au dépôt', 'En transfert vers centre', 'Entré au centre', 'En transfert', 'Vérification', 'En retour provisoire'],
 ];
 
 $titleMap = [
@@ -85,6 +86,7 @@ if ($updated > 0 || $errors > 0) {
             }
         }
     }
+    $updated += DropforHelper::syncUserShipments($app->pdo, $uid, $app->app['encryption_key'] ?? '', 40);
     $syncMessage = '<div class="alert alert-success">Sync complete. Updated ' . $updated . ' orders.</div>';
 
 // Ensure database connection is still alive after potential sync loop
@@ -92,26 +94,26 @@ ensurePdoAlive($app);
 
 // Count stats
 $placeholders = implode(',', array_fill(0, count($selectedStatuses), '?'));
-$whereClause = "s.user_id = ? AND (o.fiabilo_tracking_code IS NOT NULL OR o.intigo_tracking_code IS NOT NULL)";
+$whereClause = "s.user_id = ? AND (o.fiabilo_tracking_code IS NOT NULL OR o.intigo_tracking_code IS NOT NULL OR o.dropfor_tracking_code IS NOT NULL)";
 if ($statusKey === 'pending') {
-    $whereClause .= " AND ((o.fiabilo_tracking_code IS NOT NULL AND (o.fiabilo_status IS NULL OR o.fiabilo_status = '' OR o.fiabilo_status = 'En attente')) OR (o.intigo_tracking_code IS NOT NULL AND (o.intigo_status IS NULL OR o.intigo_status = '' OR o.intigo_status = 'En attente')))";
+    $whereClause .= " AND ((o.fiabilo_tracking_code IS NOT NULL AND (o.fiabilo_status IS NULL OR o.fiabilo_status = '' OR o.fiabilo_status = 'En attente')) OR (o.intigo_tracking_code IS NOT NULL AND (o.intigo_status IS NULL OR o.intigo_status = '' OR o.intigo_status = 'En attente')) OR (o.dropfor_tracking_code IS NOT NULL AND (o.dropfor_status IS NULL OR o.dropfor_status = '' OR o.dropfor_status IN ('En attente', 'Pickup demandé', 'À vérifier', 'À relance'))))";
 } else {
-    $whereClause .= " AND (o.fiabilo_status IN ($placeholders) OR o.intigo_status IN ($placeholders))";
+    $whereClause .= " AND (o.fiabilo_status IN ($placeholders) OR o.intigo_status IN ($placeholders) OR o.dropfor_status IN ($placeholders))";
 }
 
 if ($search !== '') {
     $searchTerm = "%$search%";
-    $whereClause .= " AND (o.name LIKE ? OR o.billing_name LIKE ? OR o.billing_phone LIKE ? OR o.fiabilo_tracking_code LIKE ? OR o.intigo_tracking_code LIKE ?)";
+    $whereClause .= " AND (o.name LIKE ? OR o.billing_name LIKE ? OR o.billing_phone LIKE ? OR o.fiabilo_tracking_code LIKE ? OR o.intigo_tracking_code LIKE ? OR o.dropfor_tracking_code LIKE ?)";
 }
 
 $sql = "SELECT o.*, s.name as shop_name FROM orders o JOIN shops s ON o.shop_id = s.id WHERE $whereClause ORDER BY o.id DESC";
 
 $finalParams = [$uid];
 if ($statusKey !== 'pending') {
-    $finalParams = array_merge($finalParams, $selectedStatuses, $selectedStatuses);
+    $finalParams = array_merge($finalParams, $selectedStatuses, $selectedStatuses, $selectedStatuses);
 }
 if ($search !== '') {
-    $finalParams = array_merge($finalParams, [$searchTerm, $searchTerm, $searchTerm, $searchTerm, $searchTerm]);
+    $finalParams = array_merge($finalParams, [$searchTerm, $searchTerm, $searchTerm, $searchTerm, $searchTerm, $searchTerm]);
 }
 
 $st = $app->pdo->prepare($sql);
@@ -131,7 +133,7 @@ $currency = $orders[0]['currency'] ?? 'TND';
 $deliveredList = ['Livré', 'Livrés', 'Livrer', 'Delivered', 'Reçu'];
 $returnedList = ['Retourné', 'Annulé', 'Retour', 'Refusé', 'Returned', 'Cancelled'];
 $shippingList = ['En cours', 'En cours de livraison', 'Expédié', 'Shipping', 'Shipped'];
-$warehouseList = ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé'];
+$warehouseList = ['Au magasin', 'Magasin', 'Entrepôt', 'Depot', 'Aramé', 'Au dépôt', 'Pickup demandé'];
 
 $allAccepted = array_merge($deliveredList, $returnedList, $shippingList, $warehouseList);
 
@@ -140,14 +142,14 @@ $placeholdersAcc = implode(',', array_fill(0, count($allAccepted), '?'));
 
 $stStats = $app->pdo->prepare("
     SELECT 
-        SUM(CASE WHEN fiabilo_status IN ($placeholdersDel) OR intigo_status IN ($placeholdersDel) THEN 1 ELSE 0 END) as delivered_count,
-        SUM(CASE WHEN fiabilo_status IN ($placeholdersAcc) OR intigo_status IN ($placeholdersAcc) THEN 1 ELSE 0 END) as accepted_count
+        SUM(CASE WHEN fiabilo_status IN ($placeholdersDel) OR intigo_status IN ($placeholdersDel) OR dropfor_status IN ($placeholdersDel) THEN 1 ELSE 0 END) as delivered_count,
+        SUM(CASE WHEN fiabilo_status IN ($placeholdersAcc) OR intigo_status IN ($placeholdersAcc) OR dropfor_status IN ($placeholdersAcc) THEN 1 ELSE 0 END) as accepted_count
     FROM orders o
     JOIN shops s ON o.shop_id = s.id
-    WHERE s.user_id = ? AND (o.fiabilo_tracking_code IS NOT NULL OR o.intigo_tracking_code IS NOT NULL)
+    WHERE s.user_id = ? AND (o.fiabilo_tracking_code IS NOT NULL OR o.intigo_tracking_code IS NOT NULL OR o.dropfor_tracking_code IS NOT NULL)
 ");
 
-$stStats->execute(array_merge($deliveredList, $deliveredList, $allAccepted, $allAccepted, [$uid]));
+$stStats->execute(array_merge($deliveredList, $deliveredList, $deliveredList, $allAccepted, $allAccepted, $allAccepted, [$uid]));
 $globalStats = $stStats->fetch();
 
 $dCount = (int)($globalStats['delivered_count'] ?? 0);
@@ -245,10 +247,12 @@ if (empty($orders)) {
             <td>
                 ' . (!empty($o['fiabilo_tracking_code']) ? '<div><small style="font-size:0.6rem; color:#94a3b8;">FIABILO:</small> <code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:0.8rem;">' . htmlspecialchars($o['fiabilo_tracking_code']) . '</code></div>' : '') . '
                 ' . (!empty($o['intigo_tracking_code']) ? '<div><small style="font-size:0.6rem; color:#94a3b8;">INTIGO:</small> <code style="background:#e0f2fe; padding:2px 4px; border-radius:4px; font-size:0.8rem; color:#0369a1;">' . htmlspecialchars($o['intigo_tracking_code']) . '</code></div>' : '') . '
+                ' . (!empty($o['dropfor_tracking_code']) ? '<div><small style="font-size:0.6rem; color:#94a3b8;">DROPFOR:</small> <code style="background:#dbeafe; padding:2px 4px; border-radius:4px; font-size:0.8rem; color:#1d4ed8;">' . htmlspecialchars($o['dropfor_tracking_code']) . '</code></div>' : '') . '
             </td>
             <td>
                 ' . (!empty($o['fiabilo_status']) ? ($statusKey === 'delivered' ? '<div class="status-confirmed-new">' . $checkIcon . ' ' . htmlspecialchars($o['fiabilo_status']) . '</div>' : '<span class="status-pill ' . ($statusKey === 'returned' ? 'danger' : 'info') . '" style="margin-bottom:2px; display:inline-block;">' . htmlspecialchars($o['fiabilo_status']) . '</span>') : '') . '
                 ' . (!empty($o['intigo_status']) ? ($statusKey === 'delivered' ? '<div class="status-confirmed-new">' . $checkIcon . ' ' . htmlspecialchars($o['intigo_status']) . '</div>' : '<span class="status-pill ' . ($statusKey === 'returned' ? 'danger' : 'info') . '" style="display:inline-block;">' . htmlspecialchars($o['intigo_status']) . '</span>') : '') . '
+                ' . (!empty($o['dropfor_status']) ? ($statusKey === 'delivered' ? '<div class="status-confirmed-new">' . $checkIcon . ' ' . htmlspecialchars($o['dropfor_status']) . '</div>' : '<span class="status-pill ' . ($statusKey === 'returned' ? 'danger' : 'info') . '" style="display:inline-block;">' . htmlspecialchars($o['dropfor_status']) . '</span>') : '') . '
             </td>
             <td style="font-weight:600;">' . number_format((float)$o['total'], 2) . ' ' . htmlspecialchars($o['currency'] ?? 'TND') . '</td>
             <td style="display:flex; gap:0.5rem;">

@@ -23,6 +23,7 @@ $allowed = [
     'order-upload', 'orders', 'order-view', 'orders-confirmed', 'orders-followup',
     'product-import', 'products', 'product-view',
     'cart', 'cart-ajax', 'integration', 'ready', 'shipping-status', 'tracking-ajax', 'delivered-orders', 'returned-orders', 'manual-order', 'leads-centre', 'leads-export-ajax',
+    'cashflow',
     'settings', 'ask-imo', 'chat-ajax', 'bot-command', 'gemini-test', 'logout'
 ];
 if (!in_array($page, $allowed, true)) {
@@ -111,6 +112,10 @@ if ($page === 'leads-centre') {
 }
 if ($page === 'leads-export-ajax') {
     require $base . '/pages/leads-export-ajax.php';
+    return;
+}
+if ($page === 'cashflow') {
+    require $base . '/pages/cashflow.php';
     return;
 }
 require $base . '/pages/dashboard.php';
