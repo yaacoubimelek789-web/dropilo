@@ -448,37 +448,208 @@ if (($page ?? '') === 'order-view') {
             exit;
         }
 
-        $addToken = FiabiloHelper::resolveAddToken($app->pdo, $uid, $encKey);
-        if ($addToken === '') {
-            $message = '<div class="alert alert-error">FIABILO add token missing. Paste the API d\'ajout in the form and try again.</div>';
-        } elseif (!empty($order['fiabilo_tracking_code'])) {
-            $message = '<div class="alert alert-error">This order is already sent to FIABILO.</div>';
-        } else {
-            $payload = [
-                'nom' => $nom,
-                'tel' => $tel,
-                'tel2' => $tel2,
-                'gouvernerat' => $gouvernorat,
-                'ville' => $ville,
-                'localite' => $localite,
-                'adresse' => $adresse,
-                'designation' => $designation,
-                'prix' => $prix ?? $order['total'] ?? 0,
-                'nb_article' => $nbArticle,
-                'nb_colis' => $nbColis,
-                'ouvrir' => $ouvrir,
-                'msg' => $order['notes'] ?? '',
-            ];
-            $result = FiabiloHelper::sendOrder($addToken, $payload);
-            if (isset($result['tracking_code'])) {
-                $app->pdo->prepare('UPDATE orders SET fiabilo_tracking_code = ?, fiabilo_status = ?, status = ?, fiabilo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
-                    ->execute([$result['tracking_code'], 'En attente', 'shipping', $id]);
-                header('Location: index.php?page=order-view&id=' . $id . '&shipped=1');
-                exit;
+        $carrier = trim((string) ($_POST['colis_carrier'] ?? 'fiabilo'));
+        $alreadyShipped = !empty($order['fiabilo_tracking_code']) || !empty($order['intigo_tracking_code']) || !empty($order['dropfor_tracking_code']);
+        if ($alreadyShipped) {
+            $message = '<div class="alert alert-error">This order is already with a shipping company.</div>';
+        } elseif ($carrier === 'intigo') {
+            $stInt = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+            $stInt->execute([$uid, 'intigo']);
+            $int = $stInt->fetch();
+            $apiKey = ($int && !empty($int['add_token_encrypted'])) ? IntigoHelper::decrypt($int['add_token_encrypted'], $encKey) : '';
+            if ($apiKey === '') {
+                $message = '<div class="alert alert-error">Connect INTIGO in Integration first.</div>';
+            } else {
+                $cid = (string) $order['name'];
+                if (strlen($cid) < 5) {
+                    $cid = 'ORD-' . str_pad($cid, 2, '0', STR_PAD_LEFT);
+                }
+                if (strlen($cid) > 20) {
+                    $cid = substr($cid, 0, 20);
+                }
+                $payload = [
+                    'cid' => $cid,
+                    'name' => $nom !== '' ? $nom : 'Customer',
+                    'phone' => substr(preg_replace('/\D/', '', $tel), -8),
+                    'amount' => (float) ($prix ?? $order['total'] ?? 0),
+                    'city' => $gouvernorat !== '' ? $gouvernorat : $ville,
+                    'subDivision' => $localite,
+                    'address' => $adresse,
+                    'pickUpAddress' => 'Default Shop Address',
+                    'pickUpCity' => 'Tunis',
+                    'pickUpSubDivision' => 'Tunis',
+                    'size' => max(1, $nbColis),
+                ];
+                $merchantId = IntigoHelper::decrypt((string) ($int['tracking_token_encrypted'] ?? ''), $encKey);
+                $result = IntigoHelper::addOrder($payload, $apiKey, $merchantId, false);
+                if (isset($result['nid'])) {
+                    $defaultStatus = IntigoHelper::getStatusLabel(IntigoHelper::STATUS_ASSIGNED);
+                    $app->pdo->prepare('UPDATE orders SET intigo_tracking_code = ?, intigo_status = ?, status = ?, intigo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['nid'], $defaultStatus, 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=INTIGO');
+                    exit;
+                }
+                $message = '<div class="alert alert-error">INTIGO: ' . htmlspecialchars($result['error'] ?? ($result['message'] ?? 'Dispatch failed')) . '</div>';
             }
-            $message = '<div class="alert alert-error">FIABILO: ' . htmlspecialchars($result['error'] ?? 'Dispatch failed') . '</div>';
+        } elseif ($carrier === 'dropfor') {
+            $token = DropforHelper::resolveToken($app->pdo, $uid, $encKey);
+            if ($token === '') {
+                $message = '<div class="alert alert-error">Connect DROPFOR in Integration first.</div>';
+            } else {
+                $payload = $order;
+                $payload['billing_name'] = $nom;
+                $payload['billing_phone'] = $tel;
+                $payload['phone'] = $tel2 !== '' ? $tel2 : $tel;
+                $payload['billing_city'] = $gouvernorat !== '' ? $gouvernorat : $ville;
+                $payload['shipping_city'] = $ville;
+                $payload['billing_address'] = $adresse;
+                $payload['total'] = $prix ?? $order['total'] ?? 0;
+                $payload['designation'] = $designation;
+                $payload['nb_article'] = $nbArticle;
+                $result = DropforHelper::addOrder($payload, $token);
+                if (!empty($result['id'])) {
+                    $app->pdo->prepare('UPDATE orders SET dropfor_tracking_code = ?, dropfor_status = ?, dropfor_payment = ?, status = ?, dropfor_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['id'], $result['status'] ?? 'En attente', $result['payment'] ?? '', 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=DROPFOR');
+                    exit;
+                }
+                $message = '<div class="alert alert-error">DROPFOR: ' . htmlspecialchars($result['error'] ?? 'Dispatch failed') . '</div>';
+            }
+        } else {
+            $addToken = FiabiloHelper::resolveAddToken($app->pdo, $uid, $encKey);
+            if ($addToken === '') {
+                $message = '<div class="alert alert-error">FIABILO add token missing. Paste the API d\'ajout in the form and try again.</div>';
+            } else {
+                $payload = [
+                    'nom' => $nom,
+                    'tel' => $tel,
+                    'tel2' => $tel2,
+                    'gouvernerat' => $gouvernorat,
+                    'ville' => $ville,
+                    'localite' => $localite,
+                    'adresse' => $adresse,
+                    'designation' => $designation,
+                    'prix' => $prix ?? $order['total'] ?? 0,
+                    'nb_article' => $nbArticle,
+                    'nb_colis' => $nbColis,
+                    'ouvrir' => $ouvrir,
+                    'msg' => $order['notes'] ?? '',
+                ];
+                $result = FiabiloHelper::sendOrder($addToken, $payload);
+                if (isset($result['tracking_code'])) {
+                    $app->pdo->prepare('UPDATE orders SET fiabilo_tracking_code = ?, fiabilo_status = ?, status = ?, fiabilo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['tracking_code'], 'En attente', 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=FIABILO');
+                    exit;
+                }
+                $message = '<div class="alert alert-error">FIABILO: ' . htmlspecialchars($result['error'] ?? 'Dispatch failed') . '</div>';
+            }
+        }
+        if ($message !== '') {
             $st->execute([$id, $uid]);
             $order = $st->fetch() ?: $order;
+        }
+    }
+
+    // Order-page shipment buttons. This page returns before the list shipping handler, so the send has to run here.
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_to_shipping'])) {
+        $shippingProvider = trim((string) ($_POST['shipping'] ?? ''));
+        $ouvrir = isset($_POST['post_open_package_permission']) ? (int) $_POST['post_open_package_permission'] : 0;
+        $encKey = $app->app['encryption_key'] ?? '';
+        $shipError = '';
+        $alreadyShipped = !empty($order['fiabilo_tracking_code']) || !empty($order['intigo_tracking_code']) || !empty($order['dropfor_tracking_code']);
+        $lineRows = $app->pdo->query('SELECT lineitem_name, lineitem_quantity FROM order_line_items WHERE order_id = ' . (int) $id)->fetchAll();
+        $designation = [];
+        $nbArticle = 0;
+        foreach ($lineRows as $l) {
+            $q = (int) $l['lineitem_quantity'];
+            $nbArticle += $q;
+            $designation[] = trim((string) $l['lineitem_name']) . ' (x' . $q . ')';
+        }
+        $designationText = implode(', ', $designation) ?: 'Order';
+
+        if ($alreadyShipped) {
+            $shipError = 'This order is already with a shipping company.';
+        } elseif ($shippingProvider === 'fiabilo') {
+            $addToken = FiabiloHelper::resolveAddToken($app->pdo, $uid, $encKey);
+            if ($addToken === '') {
+                $shipError = 'Connect FIABILO in Integration first.';
+            } else {
+                $payload = $order;
+                $payload['designation'] = $designationText;
+                $payload['nb_article'] = $nbArticle ?: 1;
+                $payload['ouvrir'] = $ouvrir;
+                $result = FiabiloHelper::sendOrder($addToken, $payload);
+                if (isset($result['tracking_code'])) {
+                    $app->pdo->prepare('UPDATE orders SET fiabilo_tracking_code = ?, fiabilo_status = ?, status = ?, fiabilo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['tracking_code'], 'En attente', 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=FIABILO');
+                    exit;
+                }
+                $shipError = 'FIABILO: ' . ($result['error'] ?? 'Dispatch failed');
+            }
+        } elseif ($shippingProvider === 'intigo') {
+            $stInt = $app->pdo->prepare('SELECT add_token_encrypted, tracking_token_encrypted FROM user_integrations WHERE user_id = ? AND provider = ?');
+            $stInt->execute([$uid, 'intigo']);
+            $int = $stInt->fetch();
+            $apiKey = ($int && !empty($int['add_token_encrypted'])) ? IntigoHelper::decrypt($int['add_token_encrypted'], $encKey) : '';
+            if ($apiKey === '') {
+                $shipError = 'Connect INTIGO in Integration first.';
+            } else {
+                $cid = (string) $order['name'];
+                if (strlen($cid) < 5) {
+                    $cid = 'ORD-' . str_pad($cid, 2, '0', STR_PAD_LEFT);
+                }
+                if (strlen($cid) > 20) {
+                    $cid = substr($cid, 0, 20);
+                }
+                $payload = [
+                    'cid' => $cid,
+                    'name' => $order['billing_name'] ?? $order['shipping_name'] ?? 'Customer',
+                    'phone' => substr(preg_replace('/\D/', '', $order['billing_phone'] ?? $order['phone'] ?? ''), -8),
+                    'amount' => (float) ($order['total'] ?? 0),
+                    'city' => $order['billing_city'] ?? $order['shipping_city'] ?? '',
+                    'subDivision' => $order['billing_zip'] ?? '',
+                    'address' => $order['billing_address'] ?? $order['shipping_address'] ?? '',
+                    'pickUpAddress' => 'Default Shop Address',
+                    'pickUpCity' => 'Tunis',
+                    'pickUpSubDivision' => 'Tunis',
+                    'size' => 1,
+                ];
+                $merchantId = IntigoHelper::decrypt((string) ($int['tracking_token_encrypted'] ?? ''), $encKey);
+                $isSandbox = ($int['api_mode'] ?? 'prod') === 'sandbox';
+                $result = IntigoHelper::addOrder($payload, $apiKey, $merchantId, $isSandbox);
+                if (isset($result['nid'])) {
+                    $defaultStatus = IntigoHelper::getStatusLabel(IntigoHelper::STATUS_ASSIGNED);
+                    $app->pdo->prepare('UPDATE orders SET intigo_tracking_code = ?, intigo_status = ?, status = ?, intigo_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['nid'], $defaultStatus, 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=INTIGO');
+                    exit;
+                }
+                $shipError = 'INTIGO: ' . ($result['error'] ?? ($result['message'] ?? 'Dispatch failed'));
+            }
+        } elseif ($shippingProvider === 'dropfor') {
+            $token = DropforHelper::resolveToken($app->pdo, $uid, $encKey);
+            if ($token === '') {
+                $shipError = 'Connect DROPFOR in Integration first.';
+            } else {
+                $payload = $order;
+                $payload['designation'] = $designationText;
+                $payload['nb_article'] = $nbArticle ?: 1;
+                $result = DropforHelper::addOrder($payload, $token);
+                if (!empty($result['id'])) {
+                    $app->pdo->prepare('UPDATE orders SET dropfor_tracking_code = ?, dropfor_status = ?, dropfor_payment = ?, status = ?, dropfor_sent_at = NOW(), shipped_at = NOW() WHERE id = ?')
+                        ->execute([$result['id'], $result['status'] ?? 'En attente', $result['payment'] ?? '', 'shipping', $id]);
+                    header('Location: index.php?page=order-view&id=' . $id . '&shipped=1&carrier=DROPFOR');
+                    exit;
+                }
+                $shipError = 'DROPFOR: ' . ($result['error'] ?? 'Dispatch failed');
+            }
+        } else {
+            $shipError = 'Choose a shipping company.';
+        }
+        if ($shipError !== '') {
+            $message = '<div class="alert alert-error">' . htmlspecialchars($shipError) . '</div>';
         }
     }
 
@@ -733,17 +904,9 @@ if (($page ?? '') === 'order-view') {
                             ' . (($order['status'] === 'confirmed' || $order['confirmed'] == 1) ? '
                             <div class="shipping-quick-actions" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.2);">
                                 <div style="font-size: 0.7rem; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 0.75rem;">Send to Shipping</div>
-                                <button type="button" class="btn-react-full" style="background: #1e293b; color: white; border: none;" onclick="openFiabiloColisModal()">FIABILO Shipment</button>
-                                <form method="post" style="margin-top: 0.5rem;">
-                                    <input type="hidden" name="order_ids[]" value="' . $id . '">
-                                    <input type="hidden" name="shipping" value="intigo">
-                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #0ea5e9; color: white; border: none;">INTIGO Shipment</button>
-                                </form>
-                                <form method="post" style="margin-top: 0.5rem;">
-                                    <input type="hidden" name="order_ids[]" value="' . $id . '">
-                                    <input type="hidden" name="shipping" value="dropfor">
-                                    <button type="submit" name="send_to_shipping" value="1" class="btn-react-full" style="background: #2563eb; color: white; border: none;">DROPFOR Shipment</button>
-                                </form>
+                                <button type="button" class="btn-react-full" style="width:100%; background: #1e293b; color: white; border: none;" onclick="openFiabiloColisModal()">FIABILO Shipment</button>
+                                <button type="button" class="btn-react-full" style="width:100%; margin-top: 0.5rem; background: #0ea5e9; color: white; border: none;" onclick="openFiabiloColisModal()">INTIGO Shipment</button>
+                                <button type="button" class="btn-react-full" style="width:100%; margin-top: 0.5rem; background: #2563eb; color: white; border: none;" onclick="openFiabiloColisModal()">DROPFOR Shipment</button>
                             </div>' : '') . '
                             ' : '<div class="read-only-notice"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg> Order is being shipped. Interaction disabled.</div>') . '
                         </div>
@@ -981,7 +1144,8 @@ if (($page ?? '') === 'order-view') {
         <script>setTimeout(function() { document.getElementById("success-toast").classList.add("active"); }, 100); setTimeout(function() { document.getElementById("success-toast").classList.remove("active"); }, 4000);</script>';
     }
     if (isset($_GET['shipped'])) {
-        $content .= '<div id="success-toast" class="toast-success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Colis sent to FIABILO</div>
+        $shippedCarrier = htmlspecialchars((string) ($_GET['carrier'] ?? 'shipping'));
+        $content .= '<div id="success-toast" class="toast-success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Colis sent to ' . $shippedCarrier . '</div>
         <script>setTimeout(function() { document.getElementById("success-toast").classList.add("active"); }, 100); setTimeout(function() { document.getElementById("success-toast").classList.remove("active"); }, 4000);</script>';
     }
 
@@ -1120,7 +1284,7 @@ if (($page ?? '') === 'order-view') {
     <div id="fiabilo-colis-modal" class="modal-modern" style="display:none;">
         <div class="modal-content-modern glass" style="max-width:720px; max-height:92vh;">
             <div class="modal-header-modern">
-                <h3>Ajouter colis — FIABILO</h3>
+                <h3>Ajouter colis</h3>
                 <button type="button" class="close-modal-btn" onclick="closeFiabiloColisModal()">&times;</button>
             </div>
             <form method="post" class="modal-form-modern" id="fiabilo-colis-form">
@@ -1150,10 +1314,16 @@ if (($page ?? '') === 'order-view') {
                     </div>
                     ' . $tokenField . '
                 </div>
-                <div class="modal-footer-modern">
-                    <button type="button" onclick="closeFiabiloColisModal()" class="btn-react btn-secondary">Annuler</button>
-                    <button type="submit" name="save_fiabilo_colis" value="1" class="btn-react btn-secondary" formnovalidate>Save</button>
-                    <button type="submit" name="send_fiabilo_colis" value="1" class="btn-react btn-primary">Envoyer à FIABILO</button>
+                <input type="hidden" name="colis_carrier" id="colis-carrier" value="fiabilo">
+                <div class="modal-footer-modern" style="flex-direction:column; align-items:stretch; gap:0.5rem;">
+                    <div style="font-size:0.7rem; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:0.04em;">Send with</div>
+                    <button type="submit" name="send_fiabilo_colis" value="1" class="btn-react-full" style="width:100%; background:#1e293b; color:#fff; border:none;" onclick="document.getElementById(\'colis-carrier\').value=\'fiabilo\'">FIABILO</button>
+                    <button type="submit" name="send_fiabilo_colis" value="1" class="btn-react-full" style="width:100%; background:#0ea5e9; color:#fff; border:none;" onclick="document.getElementById(\'colis-carrier\').value=\'intigo\'">INTIGO</button>
+                    <button type="submit" name="send_fiabilo_colis" value="1" class="btn-react-full" style="width:100%; background:#2563eb; color:#fff; border:none;" onclick="document.getElementById(\'colis-carrier\').value=\'dropfor\'">DROPFOR</button>
+                    <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:0.25rem;">
+                        <button type="button" onclick="closeFiabiloColisModal()" class="btn-react btn-secondary">Annuler</button>
+                        <button type="submit" name="save_fiabilo_colis" value="1" class="btn-react btn-secondary" formnovalidate>Save</button>
+                    </div>
                 </div>
             </form>
         </div>
@@ -1167,6 +1337,30 @@ if (($page ?? '') === 'order-view') {
     #fiabilo-colis-modal .modal-footer-modern { flex-wrap: wrap; }
     #fiabilo-colis-modal .modal-footer-modern .btn-react { min-height: 42px; }
     </style>
+    ';
+
+    $content .= '
+    <form method="post" id="order-ship-form" style="display:none;">
+        <input type="hidden" name="send_to_shipping" value="1">
+        <input type="hidden" name="order_ids[]" value="' . (int) $id . '">
+        <input type="hidden" name="shipping" id="order-ship-provider" value="">
+        <input type="hidden" name="post_open_package_permission" id="order-ship-open" value="0">
+    </form>
+    <div id="order-package-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:10050; align-items:center; justify-content:center;">
+        <div style="background:#1a1a2e; border-radius:16px; width:90%; max-width:400px; overflow:hidden; box-shadow:0 25px 80px rgba(0,0,0,0.5);">
+            <div style="background:linear-gradient(135deg,#0ea5e9 0%,#0284c7 100%); padding:20px; text-align:center; color:#fff;">
+                <h3 id="order-package-title" style="margin:0; font-size:1.25rem; color:#fff;">Package Permission</h3>
+            </div>
+            <div style="padding:24px 24px 16px;">
+                <p style="color:#fff; font-size:1.05rem; margin:0; font-weight:500; text-align:center;">Can the customer open this package before paying?</p>
+            </div>
+            <div style="background:#f8fafc; border-top:1px solid #e2e8f0; display:flex; gap:12px; padding:20px 24px;">
+                <button type="button" onclick="submitOrderShip(0)" style="flex:1; background:#fff; border:1px solid #cbd5e1; color:#475569; padding:12px; font-weight:600; border-radius:8px; font-size:1rem; cursor:pointer;">No</button>
+                <button type="button" onclick="submitOrderShip(1)" style="flex:1; background:#0ea5e9; border:none; color:#fff; padding:12px; font-weight:600; border-radius:8px; font-size:1rem; cursor:pointer;">Yes</button>
+                <button type="button" onclick="closeOrderShip()" style="flex:1; background:#fff; border:1px solid #cbd5e1; color:#475569; padding:12px; font-weight:600; border-radius:8px; font-size:1rem; cursor:pointer;">Cancel</button>
+            </div>
+        </div>
+    </div>
     ';
 
     // Total update form
@@ -1275,6 +1469,27 @@ function closeProductModal() {
 function openFiabiloColisModal() {
     var m = document.getElementById("fiabilo-colis-modal");
     if (m) m.style.display = "flex";
+}
+
+function openOrderShip(provider) {
+    var input = document.getElementById("order-ship-provider");
+    var title = document.getElementById("order-package-title");
+    var modal = document.getElementById("order-package-modal");
+    if (input) input.value = provider;
+    if (title) title.textContent = provider.toUpperCase() + " — Package Permission";
+    if (modal) modal.style.display = "flex";
+}
+
+function closeOrderShip() {
+    var modal = document.getElementById("order-package-modal");
+    if (modal) modal.style.display = "none";
+}
+
+function submitOrderShip(allow) {
+    var open = document.getElementById("order-ship-open");
+    var form = document.getElementById("order-ship-form");
+    if (open) open.value = allow ? "1" : "0";
+    if (form) form.submit();
 }
 
 function closeFiabiloColisModal() {
@@ -2281,13 +2496,14 @@ $content .= '<div class="bulk-action-bar" id="bulk-action-bar" style="display: n
     <button type="button" class="btn btn-dropilo-export" id="bulk-export-btn" style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; border: none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Export Dropilo</button>
     <button type="submit" name="bulk_action" value="confirm" class="btn btn-success" id="bulk-confirm-btn">Confirm Selected</button>
     <button type="submit" name="bulk_action" value="followup" class="btn btn-warning">Follow Up</button>
-    <button type="submit" name="bulk_action" value="shipping" class="btn btn-info">Assign to Shipping</button>
+    <button type="button" class="btn btn-info" id="bulk-assign-shipping">Assign to Shipping</button>
     <button type="button" class="btn btn-danger" id="bulk-delete-btn" style="background: #dc3545; border-color: #dc3545;">Delete</button>
   </div>
 </div>';
 
 // Hidden inputs
 $content .= '<input type="hidden" name="bulk_action" id="hidden-bulk-action" value="" disabled>';
+$content .= '<input type="hidden" id="post_shipping_provider" value="">';
 $content .= '<input type="hidden" name="post_open_package_permission" id="post_open_package_permission" value="">';
 
 $content .= '</form>';
@@ -3159,9 +3375,42 @@ if ($currentPage === 'orders') {
     </div>';
 }
 
+$dropforLogo = htmlspecialchars(($appPublicPrefix ?? '/public') . '/assets/dropfor.png');
+
+$content .= '
+<div id="choose-shipping-modal" class="delete-modal-overlay" style="display:none; z-index: 10000;">
+    <div class="delete-modal-box" style="max-width: 560px; padding-bottom: 0; text-align: left;">
+        <div style="display:flex; align-items:center; justify-content:space-between; padding: 18px 22px; border-bottom: 1px solid #e2e8f0;">
+            <h3 style="margin:0; font-size: 1.15rem; color:#ffffff;">Choose Shipping</h3>
+            <button type="button" onclick="closeChooseShippingModal()" style="background:none; border:none; font-size:1.5rem; line-height:1; cursor:pointer; color:#ffffff;">&times;</button>
+        </div>
+        <div style="padding: 20px 22px;">
+            <div id="ship-choice-grid" style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                <button type="button" class="ship-choice" data-provider="fiabilo" onclick="selectBulkShip(\'fiabilo\', this)" style="background:#fff; border:1.5px solid #e7e5e4; border-radius:12px; padding:18px 10px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer;">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                    <span style="font-size:0.8rem; font-weight:700; color:#1c1917;">FIABILO</span>
+                </button>
+                <button type="button" class="ship-choice" data-provider="intigo" onclick="selectBulkShip(\'intigo\', this)" style="background:#fff; border:1.5px solid #e7e5e4; border-radius:12px; padding:18px 10px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer;">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13" rx="2" ry="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+                    <span style="font-size:0.8rem; font-weight:700; color:#1c1917;">INTIGO</span>
+                </button>
+                <button type="button" class="ship-choice" data-provider="dropfor" onclick="selectBulkShip(\'dropfor\', this)" style="background:#fff; border:1.5px solid #e7e5e4; border-radius:12px; padding:18px 10px; display:flex; flex-direction:column; align-items:center; gap:10px; cursor:pointer;">
+                    <img src="' . $dropforLogo . '" alt="Dropfor" style="width:100%; max-width:110px; height:32px; object-fit:contain;">
+                    <span style="font-size:0.8rem; font-weight:700; color:#1c1917;">DROPFOR</span>
+                </button>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:10px; padding:16px 22px; border-top:1px solid #e2e8f0; background:#fafafa; border-radius:0 0 16px 16px;">
+            <button type="button" class="btn btn-secondary" onclick="closeChooseShippingModal()">Cancel</button>
+            <button type="button" class="btn" id="ship-choice-continue" onclick="continueBulkShip()" disabled>Continue</button>
+        </div>
+    </div>
+</div>
+';
+
 // Add the Open Package Permission Modal for Fiabilo
 $content .= '
-<div id="open-package-modal" class="delete-modal-overlay" style="display:none; z-index: 10000;">
+<div id="open-package-modal" class="delete-modal-overlay" style="display:none; z-index: 10001;">
     <div class="delete-modal-box" style="max-width: 400px; padding-bottom: 0;">
         <div class="delete-modal-header" style="background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); padding: 20px;">
             <div class="delete-warning-icon" style="margin-bottom: 8px;">
@@ -3202,16 +3451,64 @@ $content .= '
 <script>
 let pendingFiabiloForm = null;
 let pendingFiabiloAction = null;
+let selectedBulkShip = "";
+
+function closeChooseShippingModal() {
+    document.getElementById("choose-shipping-modal").style.display = "none";
+    if (document.getElementById("open-package-modal").style.display !== "flex") {
+        document.body.style.overflow = "";
+        pendingFiabiloForm = null;
+        pendingFiabiloAction = null;
+    }
+}
+
+function selectBulkShip(provider, el) {
+    selectedBulkShip = provider;
+    document.querySelectorAll("#ship-choice-grid .ship-choice").forEach(function(btn) {
+        btn.style.borderColor = "#e7e5e4";
+        btn.style.background = "#fff";
+        btn.style.boxShadow = "none";
+    });
+    el.style.borderColor = "#22c55e";
+    el.style.background = "#f0fdf4";
+    el.style.boxShadow = "0 0 0 2px rgba(34,197,94,0.2)";
+    document.getElementById("ship-choice-continue").disabled = false;
+}
+
+function applyShippingProvider(form, provider) {
+    var select = form.querySelector(\'select[name="shipping"]\');
+    var hidden = document.getElementById("post_shipping_provider");
+    if (select) {
+        select.value = provider;
+        if (hidden) hidden.removeAttribute("name");
+        return;
+    }
+    if (hidden) {
+        hidden.name = "shipping";
+        hidden.value = provider;
+    }
+}
+
+function continueBulkShip() {
+    if (!selectedBulkShip || !pendingFiabiloForm) return;
+    applyShippingProvider(pendingFiabiloForm, selectedBulkShip);
+    document.getElementById("choose-shipping-modal").style.display = "none";
+    document.getElementById("open-package-modal").style.display = "flex";
+}
 
 function closeOpenPackageModal() {
     document.getElementById("open-package-modal").style.display = "none";
-    document.body.style.overflow = ""; // restore scrolling
+    document.body.style.overflow = "";
     pendingFiabiloForm = null;
     pendingFiabiloAction = null;
+    selectedBulkShip = "";
 }
 
 function submitFiabiloOrder(permission) {
     document.getElementById("post_open_package_permission").value = permission;
+    if (selectedBulkShip && pendingFiabiloForm) {
+        applyShippingProvider(pendingFiabiloForm, selectedBulkShip);
+    }
     
     if (pendingFiabiloAction === "bulk") {
         var hiddenInput = document.createElement("input");
@@ -3221,14 +3518,12 @@ function submitFiabiloOrder(permission) {
         pendingFiabiloForm.appendChild(hiddenInput);
     }
     
-    document.body.style.pointerEvents = "none"; // prevent double clicks
+    document.body.style.pointerEvents = "none";
     pendingFiabiloForm.submit();
 }
 
 document.addEventListener("DOMContentLoaded", function() {
-    // Intercept general bulk assign to shipping button (when fiabilo is the default/only choice here or assuming we want to ask for all)
-    // We only prompt if it\'s a bulk action without a specific provider select, or if a provider select exists and it\'s fiabilo.
-    var bulkShippingBtn = document.querySelector(\'button[name="bulk_action"][value="shipping"]\');
+    var bulkShippingBtn = document.getElementById("bulk-assign-shipping");
     var ordersBulkForm = document.getElementById("orders-bulk-form");
     
     if (bulkShippingBtn && ordersBulkForm) {
@@ -3239,8 +3534,15 @@ document.addEventListener("DOMContentLoaded", function() {
             e.preventDefault();
             pendingFiabiloForm = ordersBulkForm;
             pendingFiabiloAction = "bulk";
-            document.body.style.overflow = "hidden"; // Prevent scrolling while modal is open
-            document.getElementById("open-package-modal").style.display = "flex";
+            selectedBulkShip = "";
+            document.querySelectorAll("#ship-choice-grid .ship-choice").forEach(function(btn) {
+                btn.style.borderColor = "#e7e5e4";
+                btn.style.background = "#fff";
+                btn.style.boxShadow = "none";
+            });
+            document.getElementById("ship-choice-continue").disabled = true;
+            document.body.style.overflow = "hidden";
+            document.getElementById("choose-shipping-modal").style.display = "flex";
         });
     }
 
