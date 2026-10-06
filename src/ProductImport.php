@@ -16,6 +16,8 @@ class ProductImport
                 continue;
             }
             $title = isset($row['Title']) ? trim((string) $row['Title']) : null;
+            $cost = self::firstDecimal($row, ['Cost per item', 'Variant Cost', 'Cost']);
+            $price = self::parseDecimal($row['Variant Price'] ?? null);
             if (!isset($products[$handle])) {
                 $products[$handle] = [
                     'handle' => $handle,
@@ -24,10 +26,18 @@ class ProductImport
                     'vendor' => isset($row['Vendor']) ? trim((string) $row['Vendor']) : null,
                     'type' => isset($row['Type']) ? trim((string) $row['Type']) : null,
                     'variant_sku' => isset($row['Variant SKU']) ? trim((string) $row['Variant SKU']) : null,
-                    'variant_price' => self::parseDecimal($row['Variant Price'] ?? null),
+                    'variant_price' => $price,
+                    'cost' => $cost,
                     'images' => [],
                     'status' => isset($row['Status']) ? trim((string) $row['Status']) : 'active',
                 ];
+            } else {
+                if ($products[$handle]['cost'] === null && $cost !== null) {
+                    $products[$handle]['cost'] = $cost;
+                }
+                if ($products[$handle]['variant_price'] === null && $price !== null) {
+                    $products[$handle]['variant_price'] = $price;
+                }
             }
             if (isset($row['Image Src']) && trim((string) $row['Image Src']) !== '') {
                 $pos = isset($row['Image Position']) ? (int) $row['Image Position'] : 999;
@@ -44,6 +54,21 @@ class ProductImport
             unset($p['images']);
         }
         return array_values($products);
+    }
+
+    /** First numeric value among the given CSV columns. */
+    private static function firstDecimal(array $row, array $columns): ?float
+    {
+        foreach ($columns as $column) {
+            if (!array_key_exists($column, $row)) {
+                continue;
+            }
+            $value = self::parseDecimal($row[$column]);
+            if ($value !== null) {
+                return $value;
+            }
+        }
+        return null;
     }
 
     private static function parseDecimal($v): ?float

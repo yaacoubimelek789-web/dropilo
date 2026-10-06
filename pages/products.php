@@ -36,9 +36,11 @@ if (($page ?? '') === 'product-import') {
             try {
                 $path = $_FILES['csv']['tmp_name'];
                 $productsArr = ProductImport::parse($path);
-                $ins = $app->pdo->prepare('INSERT INTO products (shop_id, handle, title, body_html, vendor, type, variant_sku, variant_price, image_src, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-                $checkDup = $app->pdo->prepare('SELECT id FROM products WHERE shop_id = ? AND handle = ?');
+                $ins = $app->pdo->prepare('INSERT INTO products (shop_id, handle, title, body_html, vendor, type, variant_sku, variant_price, image_src, cost, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                $checkDup = $app->pdo->prepare('SELECT id, cost FROM products WHERE shop_id = ? AND handle = ?');
+                $updateCost = $app->pdo->prepare('UPDATE products SET cost = ? WHERE id = ? AND shop_id = ?');
                 $imported = 0;
+                $updated = 0;
                 $skipped = 0;
                 foreach ($productsArr as $p) {
                     if (($p['title'] ?? '') === '') {
@@ -51,9 +53,15 @@ if (($page ?? '') === 'product-import') {
                         continue; 
                     }
                     $checkDup->execute([$shopId, $handle]);
-                    if ($checkDup->fetch()) {
-                        $skipped++;
-                        continue; 
+                    $existing = $checkDup->fetch();
+                    if ($existing) {
+                        if (isset($p['cost']) && $p['cost'] !== null) {
+                            $updateCost->execute([$p['cost'], $existing['id'], $shopId]);
+                            $updated++;
+                        } else {
+                            $skipped++;
+                        }
+                        continue;
                     }
                     $ins->execute([
                         $shopId,
@@ -65,11 +73,15 @@ if (($page ?? '') === 'product-import') {
                         $p['variant_sku'] ?? null,
                         $p['variant_price'],
                         $p['image_src'] ?? null,
+                        $p['cost'] ?? null,
                         $p['status'] ?? 'active',
                     ]);
                     $imported++;
                 }
                 $msgText = 'Imported ' . $imported . ' products.';
+                if ($updated > 0) {
+                    $msgText .= ' Updated cost on ' . $updated . ' existing product(s).';
+                }
                 if ($skipped > 0) {
                     $msgText .= ' Skipped ' . $skipped . ' duplicate(s).';
                 }
